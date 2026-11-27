@@ -35,14 +35,16 @@ sql_str() { local v=${1//\\/\\\\}; printf "'%s'" "${v//\'/\'\'}"; }
 sql_id()  { printf '`%s`' "${1//\`/\`\`}"; }
 # A database name as a GRANT pattern: _ and % are wildcards there, so escape
 # them to match only that database.
+db_pattern() { local v=${1//_/\\_}; printf '%s' "${v//%/\\%}"; }
 # shellcheck disable=SC2016 # the backticks are literal
-sql_db_pattern() { local v=${1//_/\\_}; v=${v//%/\\%}; printf '`%s`' "${v//\`/\`\`}"; }
+sql_db_pattern() { local v; v=$(db_pattern "$1"); printf '`%s`' "${v//\`/\`\`}"; }
 # Run one setup statement on the temporary server. sql_str's backslash
 # escaping assumes backslashes are escape characters, so clear
 # NO_BACKSLASH_ESCAPES for this session if a mounted config turns it on; the
 # rest of the configured sql_mode, and the init scripts below, are untouched.
 setup_sql() {
-    $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "SET SESSION sql_mode = TRIM(BOTH ',' FROM REPLACE(CONCAT(',', @@SESSION.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ',')); $1"
+    local sql=$1; shift
+    $MYSQL_BIN --socket=/tmp/mysql_init.sock "$@" -e "SET SESSION sql_mode = TRIM(BOTH ',' FROM REPLACE(CONCAT(',', @@SESSION.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ',')); $sql"
 }
 
 if [ ! -d "/var/lib/mysql/mysql" ]; then
@@ -96,6 +98,14 @@ if [ ! -d "/var/lib/mysql/mysql" ]; then
             log "Creating user: $MYSQL_USER"
             setup_sql "CREATE USER IF NOT EXISTS $(sql_str "$MYSQL_USER")@'%' IDENTIFIED BY $(sql_str "$MYSQL_PASSWORD");"
             setup_sql "GRANT ALL PRIVILEGES ON $(sql_db_pattern "$MYSQL_DATABASE").* TO $(sql_str "$MYSQL_USER")@'%';"
+            # Escaping can push a long name past the 64-character limit, and some
+            # MariaDB releases then store a truncated pattern without an error,
+            # leaving the grant on another database. Fail rather than start so.
+            granted="$(setup_sql "SELECT COUNT(*) FROM mysql.db WHERE User=$(sql_str "$MYSQL_USER") AND Host='%' AND Db=$(sql_str "$(db_pattern "$MYSQL_DATABASE")");" -N -s)"
+            if [ "$granted" != 1 ]; then
+                log "ERROR: the grant for $MYSQL_USER did not land on $MYSQL_DATABASE (database name too long once _ and % are escaped?)"
+                exit 1
+            fi
         fi
     fi
 
