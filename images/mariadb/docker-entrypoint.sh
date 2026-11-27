@@ -6,13 +6,13 @@ log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
 }
 
-# MariaDB 12.0 uses these specific binaries
+# MariaDB binary names
 MYSQLD_BIN="mariadbd"
 MYSQLADMIN_BIN="mariadb-admin"
 MYSQL_BIN="mariadb"
 MYSQL_INSTALL_BIN="mariadb-install-db"
 
-log "Using MariaDB 12.0 binaries:"
+log "Using MariaDB binaries:"
 log "  Server: $MYSQLD_BIN"
 log "  Admin: $MYSQLADMIN_BIN"
 log "  Client: $MYSQL_BIN"
@@ -105,7 +105,7 @@ if [ ! -d "/var/lib/mysql/mysql" ]; then
     log "Database initialization complete"
 fi
 
-log "Starting MariaDB 12.0..."
+log "Starting MariaDB..."
 
 # Replace command if it's the old mysqld name
 if [ "$1" = "mysqld" ] || [ "$1" = "mariadbd" ]; then

@@ -6,8 +6,8 @@
 # Checks that the image still is a working MariaDB, not just that it builds:
 #   * hardening: runs as mysql, no setuid/setgid binaries, no curl or gnupg,
 #     no anonymous accounts;
-#   * first start initialises the data directory, sets the root password and
-#     creates MYSQL_DATABASE and MYSQL_USER;
+#   * the image ships an empty /var/lib/mysql, and first start initialises
+#     it, sets the root password and creates MYSQL_DATABASE and MYSQL_USER;
 #   * the app user can connect over TCP and write to its database;
 #   * the HEALTHCHECK goes healthy;
 #   * `docker stop` shuts mariadbd down cleanly well inside the 10 s kill.
@@ -24,6 +24,10 @@ for tool in curl gpg; do
     echo "::error::$IMG contains $tool"; exit 1
   fi
 done
+# The package's postinst initialises a datadir; if one ships in the image the
+# entrypoint skips setup and ignores every MYSQL_* variable.
+DATADIR="$(docker run --rm --entrypoint sh "$IMG" -c 'ls -A /var/lib/mysql')"
+[[ -z "$DATADIR" ]] || { echo "::error::$IMG ships a pre-initialised /var/lib/mysql:"; echo "$DATADIR"; exit 1; }
 SUID="$(docker run --rm --entrypoint sh "$IMG" -c 'find /usr/bin /usr/sbin /bin /sbin -perm /6000 -type f 2>/dev/null' || true)"
 [[ -z "$SUID" ]] || { echo "::error::setuid/setgid binaries present:"; echo "$SUID"; exit 1; }
 

@@ -60,8 +60,13 @@ RUN apt-get purge -y apt-transport-https curl gnupg && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/* /tmp/* /var/tmp/* && \
     rm -rf /usr/share/doc/* /usr/share/man/* /usr/share/info/*
 
-# Create necessary directories with proper permissions
-RUN mkdir -p /var/lib/mysql /var/run/mysqld /docker-entrypoint-initdb.d && \
+# The mariadb-server package initialises a data directory when it installs.
+# Ship /var/lib/mysql empty: otherwise the entrypoint sees an existing
+# database and skips setup, so MYSQL_ROOT_PASSWORD, MYSQL_DATABASE and
+# MYSQL_USER are silently ignored (and a new named volume is seeded with
+# that stock database).
+RUN rm -rf /var/lib/mysql && \
+    mkdir -p /var/lib/mysql /var/run/mysqld /docker-entrypoint-initdb.d && \
     chown -R mysql:mysql /var/lib/mysql /var/run/mysqld && \
     chmod 1777 /tmp
 
