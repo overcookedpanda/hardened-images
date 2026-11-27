@@ -13,7 +13,8 @@
 #   * the HEALTHCHECK goes healthy;
 #   * `docker stop` shuts mariadbd down cleanly well inside the 10 s kill.
 #   * with NO_BACKSLASH_ESCAPES set in a mounted config, a root password with
-#     a backslash still works.
+#     a backslash still works; with lower_case_table_names=1, a mixed-case
+#     MYSQL_DATABASE still gets its grant.
 #   * a container whose first-start setup failed refuses to start on restart.
 set -euo pipefail
 IMG="${IMAGE:?set IMAGE to the image to test}"
@@ -88,11 +89,13 @@ docker logs "$NAME" 2>&1 | grep -qiE 'shutdown complete' \
 docker rm -f "$NAME" >/dev/null
 
 # A mounted config may set NO_BACKSLASH_ESCAPES; the entrypoint's escaping must
-# still hand MariaDB the password exactly as given.
+# still hand MariaDB the password exactly as given. With lower_case_table_names
+# the grant is stored lowercased, and setup must still accept it.
 ROOT_PW='smoke\root'
-printf '[mysqld]\nsql_mode=NO_BACKSLASH_ESCAPES\n' > "$CONF_DIR/sql-mode.cnf"
+printf '[mysqld]\nsql_mode=NO_BACKSLASH_ESCAPES\nlower_case_table_names=1\n' > "$CONF_DIR/sql-mode.cnf"
 chmod 755 "$CONF_DIR"; chmod 644 "$CONF_DIR/sql-mode.cnf"
 docker run -d --name "$NAME" -e MYSQL_ROOT_PASSWORD="$ROOT_PW" \
+  -e MYSQL_DATABASE=SmokeDb -e MYSQL_USER=app -e MYSQL_PASSWORD="$APP_PW" \
   -v "$CONF_DIR:/etc/mysql/conf.d:ro" \
   --health-interval=2s --health-start-period=5s "$IMG" >/dev/null
 wait_healthy
@@ -102,6 +105,8 @@ mode="$(rq 'SELECT @@GLOBAL.sql_mode')" \
   || { echo "::error::root password with a backslash rejected under NO_BACKSLASH_ESCAPES"; exit 1; }
 [[ "$mode" == *NO_BACKSLASH_ESCAPES* ]] \
   || { echo "::error::mounted config not applied (sql_mode '$mode')"; exit 1; }
+docker exec "$NAME" mariadb -h 127.0.0.1 -uapp "-p$APP_PW" SmokeDb -e 'CREATE TABLE t (id INT)' \
+  || { echo "::error::app user can't use its mixed-case database under lower_case_table_names=1"; exit 1; }
 docker rm -f "$NAME" >/dev/null
 
 # Setup that fails partway (here an init script) must not leave a datadir that

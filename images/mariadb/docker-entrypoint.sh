@@ -34,10 +34,11 @@ sql_str() { local v=${1//\\/\\\\}; printf "'%s'" "${v//\'/\'\'}"; }
 # shellcheck disable=SC2016 # the backticks are literal
 sql_id()  { printf '`%s`' "${1//\`/\`\`}"; }
 # A database name as a GRANT pattern: _ and % are wildcards there, so escape
-# them to match only that database.
-db_pattern() { local v=${1//_/\\_}; printf '%s' "${v//%/\\%}"; }
+# them to match only that database. Sets DB_PATTERN rather than printing it,
+# because command substitution would drop a trailing newline from the name.
+db_pattern() { DB_PATTERN=${1//_/\\_}; DB_PATTERN=${DB_PATTERN//%/\\%}; }
 # shellcheck disable=SC2016 # the backticks are literal
-sql_db_pattern() { local v; v=$(db_pattern "$1"); printf '`%s`' "${v//\`/\`\`}"; }
+sql_db_pattern() { db_pattern "$1"; printf '`%s`' "${DB_PATTERN//\`/\`\`}"; }
 # Run one setup statement on the temporary server. sql_str's backslash
 # escaping assumes backslashes are escape characters, so clear
 # NO_BACKSLASH_ESCAPES for this session if a mounted config turns it on; the
@@ -112,7 +113,10 @@ if [ ! -d "/var/lib/mysql/mysql" ]; then
             # Escaping can push a long name past the 64-character limit, and some
             # MariaDB releases then store a truncated pattern without an error,
             # leaving the grant on another database. Fail rather than start so.
-            granted="$(setup_sql "SELECT COUNT(*) FROM mysql.db WHERE User=$(sql_str "$MYSQL_USER") AND Host='%' AND Db=$(sql_str "$(db_pattern "$MYSQL_DATABASE")");" -N -s)"
+            # With lower_case_table_names set, the grant is stored lowercased.
+            db_pattern "$MYSQL_DATABASE"
+            expected=$(sql_str "$DB_PATTERN")
+            granted="$(setup_sql "SELECT COUNT(*) FROM mysql.db WHERE User=$(sql_str "$MYSQL_USER") AND Host='%' AND Db=IF(@@lower_case_table_names <> 0, LOWER($expected), $expected);" -N -s)"
             if [ "$granted" != 1 ]; then
                 log "ERROR: the grant for $MYSQL_USER did not land on $MYSQL_DATABASE (database name too long once _ and % are escaped?)"
                 exit 1
