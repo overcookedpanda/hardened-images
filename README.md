@@ -49,19 +49,18 @@ and [docs/pipeline.md](docs/pipeline.md) for why each step is there.
 
 ## Running the workflows in your copy
 
-Everything is gated on a repository variable so that a private fork spends no
-Actions minutes:
-
-1. **Settings → Secrets and variables → Actions → Variables**: add
-   `PIPELINES_ENABLED` = `true`. Until then only manual runs do anything.
-2. **Secrets** (Actions, and the same two under Dependabot):
+1. **Secrets** (under Actions, and the same two under Dependabot):
    `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`, a Docker account and access
    token. The nginx-proxy image and the Go builder pull from `dhi.io`, which
    needs a login even for the free Docker Hardened Images.
-3. Optional: `ALERTS_DISCORD_WEBHOOK` for alerts.
-4. Publishing to GHCR uses the built-in `GITHUB_TOKEN`; nothing to set up.
+2. Optional: `ALERTS_DISCORD_WEBHOOK` for alerts.
+3. Publishing to GHCR uses the built-in `GITHUB_TOKEN`; nothing to set up.
    After the first publish, make each package public under **Packages →
    Package settings** if the repository is public.
+
+On a private repository every run spends Actions minutes, the nightly
+schedules included. For manual runs only, cut the `on:` block of each caller
+workflow down to `workflow_dispatch`.
 
 ## License
 

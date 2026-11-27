@@ -6,13 +6,13 @@ log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
 }
 
-# MariaDB 12.0 uses these specific binaries
+# MariaDB binary names
 MYSQLD_BIN="mariadbd"
 MYSQLADMIN_BIN="mariadb-admin"
 MYSQL_BIN="mariadb"
 MYSQL_INSTALL_BIN="mariadb-install-db"
 
-log "Using MariaDB 12.0 binaries:"
+log "Using MariaDB binaries:"
 log "  Server: $MYSQLD_BIN"
 log "  Admin: $MYSQLADMIN_BIN"
 log "  Client: $MYSQL_BIN"
@@ -27,11 +27,44 @@ for binary in $MYSQLD_BIN $MYSQLADMIN_BIN $MYSQL_BIN $MYSQL_INSTALL_BIN; do
 done
 
 # Initialize database if needed
-if [ ! -d "/var/lib/mysql/mysql" ]; then
-    log "Initializing MariaDB 12.0 database..."
+# Quote a value as an SQL string literal (escapes \ and ') and an identifier
+# (doubles backticks), so a password or name with those characters can't
+# break, or inject into, the setup statements.
+sql_str() { local v=${1//\\/\\\\}; printf "'%s'" "${v//\'/\'\'}"; }
+# shellcheck disable=SC2016 # the backticks are literal
+sql_id()  { printf '`%s`' "${1//\`/\`\`}"; }
+# A database name as a GRANT pattern: _ and % are wildcards there, so escape
+# them to match only that database. Sets DB_PATTERN rather than printing it,
+# because command substitution would drop a trailing newline from the name.
+db_pattern() { DB_PATTERN=${1//_/\\_}; DB_PATTERN=${DB_PATTERN//%/\\%}; }
+# shellcheck disable=SC2016 # the backticks are literal
+sql_db_pattern() { db_pattern "$1"; printf '`%s`' "${DB_PATTERN//\`/\`\`}"; }
+# Run one setup statement on the temporary server. sql_str's backslash
+# escaping assumes backslashes are escape characters, so clear
+# NO_BACKSLASH_ESCAPES for this session if a mounted config turns it on; the
+# rest of the configured sql_mode, and the init scripts below, are untouched.
+setup_sql() {
+    local sql=$1; shift
+    $MYSQL_BIN --socket=/tmp/mysql_init.sock "$@" -e "SET SESSION sql_mode = TRIM(BOTH ',' FROM REPLACE(CONCAT(',', @@SESSION.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ',')); $sql"
+}
 
-    # Initialize database with MariaDB 12.0 command
-    $MYSQL_INSTALL_BIN --user=mysql --datadir=/var/lib/mysql
+# Set before initialization starts and removed only once it has finished, so
+# a container that failed partway refuses to start on a restart instead of
+# skipping setup and running with whatever it left behind.
+INIT_MARKER=/var/lib/mysql/.init-incomplete
+if [ -e "$INIT_MARKER" ]; then
+    log "ERROR: an earlier initialization of /var/lib/mysql did not finish (see that run's log)."
+    log "ERROR: remove the data volume, or its contents, and start again."
+    exit 1
+fi
+
+if [ ! -d "/var/lib/mysql/mysql" ]; then
+    log "Initializing MariaDB database..."
+    : > "$INIT_MARKER"
+
+    # No test database. The anonymous accounts it would also leave are dropped
+    # below, once the temporary server is up.
+    $MYSQL_INSTALL_BIN --user=mysql --datadir=/var/lib/mysql --skip-test-db
 
     # Start mariadbd temporarily for setup
     $MYSQLD_BIN --user=mysql --datadir=/var/lib/mysql --skip-networking --socket=/tmp/mysql_init.sock &
@@ -52,25 +85,42 @@ if [ ! -d "/var/lib/mysql/mysql" ]; then
         exit 1
     fi
 
+    # mariadb-install-db creates anonymous accounts (''@localhost and
+    # ''@<hostname>). A client connecting from localhost matches them before
+    # 'user'@'%', so MYSQL_USER could not log in over 127.0.0.1. They are also
+    # an unauthenticated way in, so drop them.
+    setup_sql "DELETE FROM mysql.global_priv WHERE User=''; FLUSH PRIVILEGES;"
+
     # Set root password
     if [ -n "$MYSQL_ROOT_PASSWORD" ]; then
         log "Setting root password..."
-        $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$MYSQL_ROOT_PASSWORD';"
+        setup_sql "ALTER USER 'root'@'localhost' IDENTIFIED BY $(sql_str "$MYSQL_ROOT_PASSWORD");"
 
         # Create root user for external access
-        $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '$MYSQL_ROOT_PASSWORD';"
-        $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;"
+        setup_sql "CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY $(sql_str "$MYSQL_ROOT_PASSWORD");"
+        setup_sql "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;"
     fi
 
     # Create database and user if specified
     if [ -n "$MYSQL_DATABASE" ]; then
         log "Creating database: $MYSQL_DATABASE"
-        $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "CREATE DATABASE IF NOT EXISTS \`$MYSQL_DATABASE\`;"
+        setup_sql "CREATE DATABASE IF NOT EXISTS $(sql_id "$MYSQL_DATABASE");"
 
         if [ -n "$MYSQL_USER" ] && [ -n "$MYSQL_PASSWORD" ]; then
             log "Creating user: $MYSQL_USER"
-            $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "CREATE USER IF NOT EXISTS '$MYSQL_USER'@'%' IDENTIFIED BY '$MYSQL_PASSWORD';"
-            $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "GRANT ALL PRIVILEGES ON \`$MYSQL_DATABASE\`.* TO '$MYSQL_USER'@'%';"
+            setup_sql "CREATE USER IF NOT EXISTS $(sql_str "$MYSQL_USER")@'%' IDENTIFIED BY $(sql_str "$MYSQL_PASSWORD");"
+            setup_sql "GRANT ALL PRIVILEGES ON $(sql_db_pattern "$MYSQL_DATABASE").* TO $(sql_str "$MYSQL_USER")@'%';"
+            # Escaping can push a long name past the 64-character limit, and some
+            # MariaDB releases then store a truncated pattern without an error,
+            # leaving the grant on another database. Fail rather than start so.
+            # With lower_case_table_names set, the grant is stored lowercased.
+            db_pattern "$MYSQL_DATABASE"
+            expected=$(sql_str "$DB_PATTERN")
+            granted="$(setup_sql "SELECT COUNT(*) FROM mysql.db WHERE User=$(sql_str "$MYSQL_USER") AND Host='%' AND Db=IF(@@lower_case_table_names <> 0, LOWER($expected), $expected);" -N -s)"
+            if [ "$granted" != 1 ]; then
+                log "ERROR: the grant for $MYSQL_USER did not land on $MYSQL_DATABASE (database name too long once _ and % are escaped?)"
+                exit 1
+            fi
         fi
     fi
 
@@ -95,10 +145,11 @@ if [ ! -d "/var/lib/mysql/mysql" ]; then
     kill $MYSQLD_PID
     wait $MYSQLD_PID
 
+    rm -f "$INIT_MARKER"
     log "Database initialization complete"
 fi
 
-log "Starting MariaDB 12.0..."
+log "Starting MariaDB..."
 
 # Replace command if it's the old mysqld name
 if [ "$1" = "mysqld" ] || [ "$1" = "mariadbd" ]; then

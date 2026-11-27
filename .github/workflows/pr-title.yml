@@ -2,7 +2,6 @@ name: pr-title
 
 # Squash merges use the PR title as the commit message, so the title has to be
 # a conventional commit (feat:, fix:, chore:, ...). Runs on title edits too.
-# Gated on PIPELINES_ENABLED like everything else here.
 
 on:
   pull_request:
@@ -12,7 +11,6 @@ permissions: {}
 
 jobs:
   title:
-    if: vars.PIPELINES_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read

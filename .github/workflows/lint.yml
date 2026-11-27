@@ -1,8 +1,6 @@
 name: lint
 
-# actionlint for the workflows, shellcheck for the scripts. Gated on
-# PIPELINES_ENABLED like the image workflows, so a private copy spends no
-# Actions minutes.
+# actionlint for the workflows, shellcheck for the scripts.
 
 on:
   pull_request:
@@ -14,7 +12,6 @@ permissions: {}
 
 jobs:
   lint:
-    if: vars.PIPELINES_ENABLED == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read

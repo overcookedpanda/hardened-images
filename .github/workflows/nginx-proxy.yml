@@ -2,11 +2,6 @@ name: nginx-proxy
 
 # Builds, smoke-tests, scans and publishes ghcr.io/<owner>/hardened-nginx-proxy
 # through the reusable build-scan-publish.yml. See images/nginx-proxy/README.md.
-#
-# Runs only when the repository variable PIPELINES_ENABLED is 'true' (or on a
-# manual run), so nothing spends Actions minutes while the repository is
-# private. Set it once the repository is public, where standard runners are
-# free.
 
 on:
   push:
@@ -28,7 +23,6 @@ permissions: {}
 
 jobs:
   image:
-    if: vars.PIPELINES_ENABLED == 'true' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
       packages: write
