@@ -14,13 +14,15 @@
 #   * `docker stop` shuts mariadbd down cleanly well inside the 10 s kill.
 #   * with NO_BACKSLASH_ESCAPES set in a mounted config, a root password with
 #     a backslash still works.
+#   * a container whose first-start setup failed refuses to start on restart.
 set -euo pipefail
 IMG="${IMAGE:?set IMAGE to the image to test}"
 NAME=mariadb-smoke
 # A quote and a backslash, so the entrypoint's SQL quoting is exercised.
 APP_PW="smoke'app\\pw"
 CONF_DIR="$(mktemp -d)"
-trap 'rc=$?; (( rc )) && docker logs "$NAME" 2>&1 | tail -80; docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$CONF_DIR"' EXIT
+INIT_DIR="$(mktemp -d)"
+trap 'rc=$?; (( rc )) && docker logs "$NAME" 2>&1 | tail -80; docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$CONF_DIR" "$INIT_DIR"' EXIT
 
 user="$(docker inspect -f '{{.Config.User}}' "$IMG")"
 [[ "$user" == mysql ]] || { echo "::error::$IMG runs as '${user:-root}', expected mysql"; exit 1; }
@@ -100,5 +102,18 @@ mode="$(rq 'SELECT @@GLOBAL.sql_mode')" \
   || { echo "::error::root password with a backslash rejected under NO_BACKSLASH_ESCAPES"; exit 1; }
 [[ "$mode" == *NO_BACKSLASH_ESCAPES* ]] \
   || { echo "::error::mounted config not applied (sql_mode '$mode')"; exit 1; }
+docker rm -f "$NAME" >/dev/null
+
+# Setup that fails partway (here an init script) must not leave a datadir that
+# a restart then runs with.
+printf 'echo "failing on purpose"; false\n' > "$INIT_DIR/fail.sh"
+chmod 755 "$INIT_DIR"; chmod 644 "$INIT_DIR/fail.sh"
+docker run -d --name "$NAME" -e MYSQL_ROOT_PASSWORD=smoke-root \
+  -v "$INIT_DIR:/docker-entrypoint-initdb.d:ro" "$IMG" >/dev/null
+[[ "$(docker wait "$NAME")" != 0 ]] || { echo "::error::setup with a failing init script did not fail"; exit 1; }
+docker start "$NAME" >/dev/null
+[[ "$(docker wait "$NAME")" != 0 ]] || { echo "::error::container started after a failed setup"; exit 1; }
+docker logs "$NAME" 2>&1 | grep -q 'earlier initialization of /var/lib/mysql did not finish' \
+  || { echo "::error::restart after a failed setup did not refuse with the expected message"; exit 1; }
 
 echo "MariaDB smoke test passed."

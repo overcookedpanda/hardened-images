@@ -47,8 +47,19 @@ setup_sql() {
     $MYSQL_BIN --socket=/tmp/mysql_init.sock "$@" -e "SET SESSION sql_mode = TRIM(BOTH ',' FROM REPLACE(CONCAT(',', @@SESSION.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ',')); $sql"
 }
 
+# Set before initialization starts and removed only once it has finished, so
+# a container that failed partway refuses to start on a restart instead of
+# skipping setup and running with whatever it left behind.
+INIT_MARKER=/var/lib/mysql/.init-incomplete
+if [ -e "$INIT_MARKER" ]; then
+    log "ERROR: an earlier initialization of /var/lib/mysql did not finish (see that run's log)."
+    log "ERROR: remove the data volume, or its contents, and start again."
+    exit 1
+fi
+
 if [ ! -d "/var/lib/mysql/mysql" ]; then
     log "Initializing MariaDB database..."
+    : > "$INIT_MARKER"
 
     # No test database. The anonymous accounts it would also leave are dropped
     # below, once the temporary server is up.
@@ -130,6 +141,7 @@ if [ ! -d "/var/lib/mysql/mysql" ]; then
     kill $MYSQLD_PID
     wait $MYSQLD_PID
 
+    rm -f "$INIT_MARKER"
     log "Database initialization complete"
 fi
 
