@@ -1,0 +1,34 @@
+name: lint
+
+# actionlint for the workflows, shellcheck for the scripts. Gated on
+# PIPELINES_ENABLED like the image workflows, so a private copy spends no
+# Actions minutes.
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  lint:
+    if: vars.PIPELINES_ENABLED == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # actionlint runs shellcheck on every `run:` block as well.
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
+
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          mapfile -t scripts < <(git ls-files '*.sh' | grep -v '/upstream/')
+          shellcheck --severity=warning "${scripts[@]}"

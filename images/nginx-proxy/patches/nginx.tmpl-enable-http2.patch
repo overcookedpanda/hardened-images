@@ -1,0 +1,13 @@
+--- nginx.tmpl.1.11.6-orig	2026-11-19 12:56:06.425969531 +0000
++++ nginx.tmpl	2026-11-19 12:56:06.431969624 +0000
+@@ -890,7 +890,10 @@
+     server_name _; # This is just an invalid value which will never trigger on a real hostname.
+     server_tokens off;
+     {{ template "access_log" (dict "Enable" $globals.config.enable_access_log) }}
++    {{- /* LOCAL PATCH (hardened-images, 2026-11-19): upstream hardcodes http2 here, which keeps h2c on :80 even with ENABLE_HTTP2=false. Drop this patch once upstream honors the setting. */}}
++    {{- if parseBool $globals.config.enable_http2 }}
+     http2 on;
++    {{- end }}
+         {{- if $fallback_http }}
+     listen {{ $globals.config.external_http_port }} {{- $proxy_protocol }}; {{- /* Do not add `default_server` (see comment above). */}}
+                 {{- if $globals.config.enable_ipv6 }}

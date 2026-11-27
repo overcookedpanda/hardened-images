@@ -1,0 +1,12 @@
+--- nginx.tmpl.after-http2-patch
++++ nginx.tmpl
+@@ -1075,7 +1075,8 @@
+     ssl_dhparam {{ printf "/etc/nginx/certs/%s.dhparam.pem" $vhost.cert }};
+             {{- end }}
+ 
+-            {{- if (exists (printf "/etc/nginx/certs/%s.chain.pem" $vhost.cert)) }}
++            {{- /* LOCAL PATCH (hardened-images, 2026-11-27): OCSP stapling is opt-in (ENABLE_OCSP_STAPLING=true). Let's Encrypt certificates no longer carry an OCSP URL, so upstream's unconditional stapling only makes nginx warn "ssl_stapling ignored" for every certificate on every reload. */}}
++            {{- if and ($globals.Env.ENABLE_OCSP_STAPLING | default "false" | parseBool) (exists (printf "/etc/nginx/certs/%s.chain.pem" $vhost.cert)) }}
+     ssl_stapling on;
+     ssl_stapling_verify on;
+     ssl_trusted_certificate {{ printf "/etc/nginx/certs/%s.chain.pem" $vhost.cert }};

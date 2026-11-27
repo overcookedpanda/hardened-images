@@ -1,0 +1,128 @@
+#!/bin/bash
+# shellcheck disable=SC2034
+{{- $DEFAULT_ACMESH_DNS_API_CONFIG := fromYaml (coalesce $.Env.ACMESH_DNS_API_CONFIG "") }}
+{{- if $DEFAULT_ACMESH_DNS_API_CONFIG }}
+    {{- "\n" }}declare -A DEFAULT_ACMESH_DNS_API_CONFIG=(
+    {{- range $key, $value := $DEFAULT_ACMESH_DNS_API_CONFIG }}
+        {{- "\n\t" }}['{{ $key }}']='{{ $value }}'
+    {{- end }}
+    {{- "\n" }})
+{{- end }}
+
+
+ACME_CONTAINERS=(
+{{ $orderedContainers := sortObjectsByKeysDesc $ "Created" }}
+{{ range $_, $container := $orderedContainers }}
+    {{ $rawHosts := trim (coalesce $container.Env.ACME_HOST $container.Env.LETSENCRYPT_HOST "") }}
+    {{ $hosts := trimSuffix "," $rawHosts }}
+    {{ if $hosts }}
+        {{ if parseBool (coalesce $container.Env.ACME_SINGLE_DOMAIN_CERTS $container.Env.LETSENCRYPT_SINGLE_DOMAIN_CERTS "false") }}
+            {{/* Explicit per-domain splitting of the certificate */}}
+            {{ range $host := split $hosts "," }}
+                {{ $host := trim $host }}
+                {{ $host := trimSuffix "." $host }}
+                {{- if $host }}
+                    {{- "\n\t" }}'{{ printf "%.12s" $container.ID }}_{{ sha1 $host }}' # {{ $container.Name }}, created at {{ $container.Created }}
+                {{- end }}
+            {{ end }}
+        {{ else }}
+            {{/* Default: multi-domain (SAN) certificate */}}
+            {{- "\n\t" }}'{{ printf "%.12s" $container.ID }}' # {{ $container.Name }}, created at {{ $container.Created }}
+        {{ end }}
+    {{ end }}
+{{ end }}
+)
+
+{{ range $_, $container := $orderedContainers }}
+    {{/* ACME_HOST is preferred, LETSENCRYPT_HOST kept for backward compatibility. */}}
+    {{ $rawHosts := trim (coalesce $container.Env.ACME_HOST $container.Env.LETSENCRYPT_HOST "") }}
+    {{ $hosts := trimSuffix "," $rawHosts }}
+    {{ if $hosts }}
+        {{/* Trim spaces and set empty values on per-container environment variables */}}
+        {{ $KEYSIZE := trim (coalesce $container.Env.ACME_KEYSIZE $container.Env.LETSENCRYPT_KEYSIZE "") }}
+        {{ $STAGING := trim (coalesce $container.Env.LETSENCRYPT_TEST "") }}
+        {{ $EMAIL := trim (coalesce $container.Env.ACME_EMAIL $container.Env.LETSENCRYPT_EMAIL "") }}
+        {{ $CA_URI := trim (coalesce $container.Env.ACME_CA_URI "") }}
+        {{ $ACME_CHALLENGE := trim (coalesce $container.Env.ACME_CHALLENGE "") }}
+        {{ $ACME_CERT_PROFILE := trim (coalesce $container.Env.ACME_CERT_PROFILE "") }}
+        {{ $ACMESH_DNS_API_CONFIG := fromYaml (coalesce $container.Env.ACMESH_DNS_API_CONFIG "") }}
+        {{ $PREFERRED_CHAIN := trim (coalesce $container.Env.ACME_PREFERRED_CHAIN "") }}
+        {{ $OCSP := trim (coalesce $container.Env.ACME_OCSP "") }}
+        {{ $EAB_KID := trim (coalesce $container.Env.ACME_EAB_KID "") }}
+        {{ $EAB_HMAC_KEY := trim (coalesce $container.Env.ACME_EAB_HMAC_KEY "") }}
+        {{ $ZEROSSL_API_KEY := trim (coalesce $container.Env.ZEROSSL_API_KEY "") }}
+        {{ $RESTART_CONTAINER := trim (coalesce $container.Env.ACME_RESTART_CONTAINER $container.Env.LETSENCRYPT_RESTART_CONTAINER "") }}
+        {{ $PRE_HOOK := trim (coalesce $container.Env.ACME_PRE_HOOK "") }}
+        {{ $POST_HOOK := trim (coalesce $container.Env.ACME_POST_HOOK "") }}
+        {{ $RENEW_AFTER := trim (coalesce $container.Env.ACME_RENEW_AFTER "") }}
+        {{ $RENEW_PRIVATE_KEYS := trim (coalesce $container.Env.ACME_RENEW_PRIVATE_KEYS "") }}
+        {{ $cid := printf "%.12s" $container.ID }}
+        {{- "\n" }}# Container {{ $cid }} ({{ $container.Name }})
+        {{ if parseBool (coalesce $container.Env.ACME_SINGLE_DOMAIN_CERTS $container.Env.LETSENCRYPT_SINGLE_DOMAIN_CERTS "false") }}
+            {{/* Explicit per-domain splitting of the certificate */}}
+            {{ range $host := split $hosts "," }}
+                {{ $host := trim $host }}
+                {{ $host := trimSuffix "." $host }}
+                {{ $hostHash := sha1 $host }}
+                {{- "\n" }}ACME_{{ $cid }}_{{ $hostHash }}_HOST=('{{ $host }}')
+                {{- "\n" }}ACME_{{ $cid }}_{{ $hostHash }}_KEYSIZE="{{ $KEYSIZE }}"
+                {{- "\n" }}LETSENCRYPT_{{ $cid }}_{{ $hostHash }}_TEST="{{ $STAGING }}"
+                {{- "\n" }}ACME_{{ $cid }}_{{ $hostHash }}_EMAIL="{{ $EMAIL }}"
+                {{- "\n" }}ACME_{{ $cid }}_{{ $hostHash }}_CA_URI="{{ $CA_URI }}"
+                {{- "\n" }}ACME_{{ $cid }}_{{ $hostHash }}_CHALLENGE="{{ $ACME_CHALLENGE }}"
+                {{- "\n" }}ACME_{{ $cid }}_{{ $hostHash }}_CERT_PROFILE="{{ $ACME_CERT_PROFILE }}"
+                {{- if $ACMESH_DNS_API_CONFIG }}
+                    {{- "\n" }}declare -A ACMESH_{{ $cid }}_{{ $hostHash }}_DNS_API_CONFIG=(
+                    {{- range $key, $value := $ACMESH_DNS_API_CONFIG }}
+                        {{- "\n\t" }}['{{ $key }}']='{{ $value }}'
+                    {{- end }}
+                    {{- "\n" }})
+                {{- end }}
+                {{- "\n" }}ACME_{{ $cid }}_{{ $hostHash }}_PREFERRED_CHAIN="{{ $PREFERRED_CHAIN }}"
+                {{- "\n" }}ACME_{{ $cid }}_{{ $hostHash }}_OCSP="{{ $OCSP }}"
+                {{- "\n" }}ACME_{{ $cid }}_{{ $hostHash }}_EAB_KID="{{ $EAB_KID }}"
+                {{- "\n" }}ACME_{{ $cid }}_{{ $hostHash }}_EAB_HMAC_KEY="{{ $EAB_HMAC_KEY }}"
+                {{- "\n" }}ZEROSSL_{{ $cid }}_{{ $hostHash }}_API_KEY="{{ $ZEROSSL_API_KEY }}"
+                {{- "\n" }}ACME_{{ $cid }}_{{ $hostHash }}_RESTART_CONTAINER="{{ $RESTART_CONTAINER }}"
+                {{- "\n" }}ACME_{{ $cid }}_{{ $hostHash }}_PRE_HOOK="{{ $PRE_HOOK }}"
+                {{- "\n" }}ACME_{{ $cid }}_{{ $hostHash }}_POST_HOOK="{{ $POST_HOOK }}"
+                {{- "\n" }}ACME_{{ $cid }}_{{ $hostHash }}_RENEW_AFTER="{{ $RENEW_AFTER }}"
+                {{- "\n" }}ACME_{{ $cid }}_{{ $hostHash }}_RENEW_PRIVATE_KEYS="{{ $RENEW_PRIVATE_KEYS }}"
+            {{ end }}
+        {{ else }}
+            {{/* Default: multi-domain (SAN) certificate */}}
+            {{- "\n" }}ACME_{{ $cid }}_HOST=( 
+                    {{- range $host := split $hosts "," }}
+                        {{- $host := trim $host }}
+                        {{- $host := trimSuffix "." $host }}
+                        {{- if $host }}
+                            {{- "\n\t" }}'{{ $host }}'
+                        {{- end }}
+                    {{- end }}
+            {{- "\n" }})
+            {{- "\n" }}ACME_{{ $cid }}_KEYSIZE="{{ $KEYSIZE }}"
+            {{- "\n" }}LETSENCRYPT_{{ $cid }}_TEST="{{ $STAGING }}"
+            {{- "\n" }}ACME_{{ $cid }}_EMAIL="{{ $EMAIL }}"
+            {{- "\n" }}ACME_{{ $cid }}_CA_URI="{{ $CA_URI }}"
+            {{- "\n" }}ACME_{{ $cid }}_CHALLENGE="{{ $ACME_CHALLENGE }}"
+            {{- "\n" }}ACME_{{ $cid }}_CERT_PROFILE="{{ $ACME_CERT_PROFILE }}"
+            {{- if $ACMESH_DNS_API_CONFIG }}
+                {{- "\n" }}declare -A ACMESH_{{ $cid }}_DNS_API_CONFIG=(
+                {{- range $key, $value := $ACMESH_DNS_API_CONFIG }}
+                    {{- "\n\t" }}['{{ $key }}']='{{ $value }}'
+                {{- end }}
+                {{- "\n" }})
+            {{- end }}
+            {{- "\n" }}ACME_{{ $cid }}_PREFERRED_CHAIN="{{ $PREFERRED_CHAIN }}"
+            {{- "\n" }}ACME_{{ $cid }}_OCSP="{{ $OCSP }}"
+            {{- "\n" }}ACME_{{ $cid }}_EAB_KID="{{ $EAB_KID }}"
+            {{- "\n" }}ACME_{{ $cid }}_EAB_HMAC_KEY="{{ $EAB_HMAC_KEY }}"
+            {{- "\n" }}ZEROSSL_{{ $cid }}_API_KEY="{{ $ZEROSSL_API_KEY }}"
+            {{- "\n" }}ACME_{{ $cid }}_RESTART_CONTAINER="{{ $RESTART_CONTAINER }}"
+            {{- "\n" }}ACME_{{ $cid }}_PRE_HOOK="{{ $PRE_HOOK }}"
+            {{- "\n" }}ACME_{{ $cid }}_POST_HOOK="{{ $POST_HOOK }}"
+            {{- "\n" }}ACME_{{ $cid }}_RENEW_AFTER="{{ $RENEW_AFTER }}"
+            {{- "\n" }}ACME_{{ $cid }}_RENEW_PRIVATE_KEYS="{{ $RENEW_PRIVATE_KEYS }}"
+        {{ end }}
+    {{ end }}
+{{ end }}

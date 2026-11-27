@@ -1,0 +1,47 @@
+version: 2
+
+# The nginx-proxy image and the acme-companion Go builder are FROM dhi.io
+# (Docker Hardened Images), which only answers authenticated requests.
+# Dependabot reads Dependabot secrets, a separate store from Actions secrets:
+# DOCKERHUB_USERNAME and DOCKERHUB_TOKEN must exist in both.
+registries:
+  dhi:
+    type: docker-registry
+    url: dhi.io
+    username: ${{secrets.DOCKERHUB_USERNAME}}
+    password: ${{secrets.DOCKERHUB_TOKEN}}
+
+updates:
+  # Keeps the SHA-pinned actions current (the comment after each SHA too).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: chore(deps)
+
+  - package-ecosystem: docker
+    directories:
+      - /images/mariadb
+      - /images/nginx-proxy
+      - /images/acme-companion
+    registries: [ dhi ]
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore(deps)
+
+  # docker-gen, forego and their libraries (shared by nginx-proxy and
+  # acme-companion). Security floors above upstream's pins live here too.
+  - package-ecosystem: gomod
+    directory: /images/nginx-proxy/tools
+    schedule:
+      interval: weekly
+    groups:
+      go:
+        patterns: ["*"]
+    commit-message:
+      prefix: chore(deps)

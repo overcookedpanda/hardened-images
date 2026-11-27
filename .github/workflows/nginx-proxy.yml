@@ -1,0 +1,47 @@
+name: nginx-proxy
+
+# Builds, smoke-tests, scans and publishes ghcr.io/<owner>/hardened-nginx-proxy
+# through the reusable build-scan-publish.yml. See images/nginx-proxy/README.md.
+#
+# Runs only when the repository variable PIPELINES_ENABLED is 'true' (or on a
+# manual run), so nothing spends Actions minutes while the repository is
+# private. Set it once the repository is public, where standard runners are
+# free.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'images/nginx-proxy/**'
+      - '.github/workflows/nginx-proxy.yml'
+      - '.github/workflows/build-scan-publish.yml'
+  pull_request:
+    paths:
+      - 'images/nginx-proxy/**'
+      - '.github/workflows/nginx-proxy.yml'
+      - '.github/workflows/build-scan-publish.yml'
+  schedule:
+    - cron: '30 2 * * *'  # nightly: picks up base-image and package fixes
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  image:
+    if: vars.PIPELINES_ENABLED == 'true' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build-scan-publish.yml
+    with:
+      image-name: hardened-nginx-proxy
+      context: images/nginx-proxy
+      dockerfile: images/nginx-proxy/Dockerfile
+      smoke-test: images/nginx-proxy/smoke-test.sh
+      trivyignore: images/nginx-proxy/.trivyignore
+      dhi-login: true
+      extra-tags: '1.11.6'
+    secrets:
+      dhi-username: ${{ secrets.DOCKERHUB_USERNAME }}
+      dhi-token: ${{ secrets.DOCKERHUB_TOKEN }}
+      discord-webhook: ${{ secrets.ALERTS_DISCORD_WEBHOOK }}

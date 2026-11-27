@@ -1,0 +1,590 @@
+name: Build, scan and publish an image
+
+# Reusable workflow: build one container image, smoke-test it, scan it with
+# Trivy, and publish it only if the scan passes. The image that gets pushed is
+# the exact image that was scanned.
+#
+#   build -> smoke test -> Trivy report (all severities, artifact)
+#         -> Trivy gate (fixable findings only, split by package type)
+#         -> diff against the published image (packages and CVEs)
+#         -> push            [gate passed; nightly runs only if packages changed]
+#         -> alert           [only when the rebuild resolved CVEs]
+#         -> prune old GHCR versions -> verify the tags survived the prune
+#
+# Pull requests build, smoke-test and scan, and never publish.
+#
+# Why the nightly run skips no-op pushes: `apt-get update` / `apk upgrade`
+# rewrite package indexes on every build, so a rebuild gets a new layer digest
+# even when nothing changed. Left alone, that publishes a new version every
+# night and burns through the prune window. Scheduled runs compare the package
+# list with the published image and skip the push when it is identical. Code
+# changes (push, dispatch) always publish.
+#
+# Why the alert fires only on resolved CVEs: a new image is not by itself a
+# reason to restart a database or a proxy. Every alert carries a concrete
+# reason to pull.
+#
+# See docs/pipeline.md for the design notes and docs/using-the-workflow.md for
+# how to call this from another repository.
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: 'Image name without registry or tag, e.g. hardened-mariadb'
+        required: true
+        type: string
+      context:
+        description: 'Docker build context, relative to the repository root'
+        required: true
+        type: string
+      dockerfile:
+        description: 'Dockerfile path (default: <context>/Dockerfile)'
+        required: false
+        type: string
+        default: ''
+      build-args:
+        description: 'Build args, one KEY=VALUE per line'
+        required: false
+        type: string
+        default: ''
+      platform:
+        description: 'Target platform. One platform, because the image is scanned locally before it is pushed.'
+        required: false
+        type: string
+        default: 'linux/amd64'
+      registry:
+        description: 'Registry to publish to (ghcr.io or docker.io)'
+        required: false
+        type: string
+        default: 'ghcr.io'
+      namespace:
+        description: 'Registry namespace (default: the repository owner, lowercased)'
+        required: false
+        type: string
+        default: ''
+      smoke-test:
+        description: 'Optional script run after the build, with IMAGE set to the candidate image. Must exit non-zero on failure.'
+        required: false
+        type: string
+        default: ''
+      trivyignore:
+        description: 'Optional .trivyignore path for accepted findings'
+        required: false
+        type: string
+        default: ''
+      gate-os-severity:
+        description: 'Fail on fixable OS-package findings at these severities (empty: no OS gate)'
+        required: false
+        type: string
+        default: 'CRITICAL,HIGH,MEDIUM'
+      gate-library-severity:
+        description: 'Fail on fixable language-package findings (Go, npm, pip...) at these severities (empty: no library gate)'
+        required: false
+        type: string
+        default: 'CRITICAL,HIGH'
+      publish:
+        description: 'Push when the gate passes. Pull requests never push, whatever this says.'
+        required: false
+        type: boolean
+        default: true
+      tag-latest:
+        description: 'Move the latest tag on every publish'
+        required: false
+        type: boolean
+        default: true
+      extra-tags:
+        description: 'More tags to push, space-separated (e.g. a version)'
+        required: false
+        type: string
+        default: ''
+      skip-unchanged-nightly:
+        description: 'On scheduled runs, skip the push when the package list matches the published image'
+        required: false
+        type: boolean
+        default: true
+      dhi-login:
+        description: 'Log in to dhi.io before building (Docker Hardened Images need a login, even the free ones)'
+        required: false
+        type: boolean
+        default: false
+      prune:
+        description: 'Prune old versions after a push (GHCR only)'
+        required: false
+        type: boolean
+        default: true
+      keep-versions:
+        description: 'Versions to keep when pruning'
+        required: false
+        type: number
+        default: 10
+      keep-untagged:
+        description: 'Untagged versions to keep when pruning (keep a floor; see docs/pipeline.md)'
+        required: false
+        type: number
+        default: 3
+    secrets:
+      registry-username:
+        description: 'Registry user (not needed for ghcr.io: GITHUB_TOKEN is used)'
+        required: false
+      registry-password:
+        description: 'Registry password or token (not needed for ghcr.io)'
+        required: false
+      dhi-username:
+        description: 'Docker account for dhi.io pulls'
+        required: false
+      dhi-token:
+        description: 'Docker access token for dhi.io pulls'
+        required: false
+      discord-webhook:
+        description: 'Optional Discord webhook for alerts'
+        required: false
+    outputs:
+      image:
+        description: 'Image reference (registry/namespace/name)'
+        value: ${{ jobs.image.outputs.image }}
+      digest:
+        description: 'Digest of the published image (empty when nothing was published)'
+        value: ${{ jobs.image.outputs.digest }}
+      published:
+        description: "'true' when a new version was pushed"
+        value: ${{ jobs.image.outputs.published }}
+      resolved-count:
+        description: 'CVEs the new image resolved against the previously published one'
+        value: ${{ jobs.image.outputs.resolved-count }}
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    # Callers must grant at least these.
+    permissions:
+      contents: read
+      packages: write   # push to GHCR and prune old versions
+    concurrency:
+      group: image-${{ inputs.image-name }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    outputs:
+      image: ${{ steps.vars.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+      published: ${{ steps.push.outcome == 'success' }}
+      resolved-count: ${{ steps.diff.outputs.resolved_count }}
+    env:
+      CANDIDATE: candidate-${{ inputs.image-name }}:${{ github.run_id }}
+      TRIVY_CACHE: ${{ github.workspace }}/.cache/trivy
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve image name and publish mode
+        id: vars
+        shell: bash
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          NAMESPACE: ${{ inputs.namespace }}
+          OWNER: ${{ github.repository_owner }}
+          NAME: ${{ inputs.image-name }}
+          PUBLISH: ${{ inputs.publish }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          ns="${NAMESPACE:-$OWNER}"
+          image="${REGISTRY}/${ns,,}/${NAME}"
+          push=false
+          if [[ "$PUBLISH" == "true" && "$EVENT" != "pull_request" ]]; then push=true; fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "push=$push" >> "$GITHUB_OUTPUT"
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+          echo "Image: $image (publish: $push)"
+
+      # Docker Hardened Images answer only authenticated pulls, even the free
+      # ones. Dependabot runs read Dependabot secrets, not Actions secrets, so
+      # the same two names have to exist in both stores.
+      - name: Log in to Docker Hardened Images
+        if: inputs.dhi-login
+        shell: bash
+        env:
+          DHI_USER: ${{ secrets.dhi-username }}
+          DHI_TOKEN: ${{ secrets.dhi-token }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$DHI_USER" || -z "$DHI_TOKEN" ]]; then
+            echo "::error::dhi-login is on but the dhi-username / dhi-token secrets are empty"
+            exit 1
+          fi
+          echo "$DHI_TOKEN" | docker login dhi.io -u "$DHI_USER" --password-stdin
+
+      - name: Build candidate image
+        shell: bash
+        env:
+          CONTEXT: ${{ inputs.context }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          BUILD_ARGS: ${{ inputs.build-args }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r line; do
+            [[ -n "${line// }" ]] && args+=(--build-arg "$line")
+          done <<< "$BUILD_ARGS"
+          # --pull re-resolves the base, so a patched base always lands.
+          docker build --pull --platform "$PLATFORM" \
+            -f "${DOCKERFILE:-$CONTEXT/Dockerfile}" \
+            ${args[@]+"${args[@]}"} \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            -t "$CANDIDATE" "$CONTEXT"
+
+      - name: Smoke test
+        if: inputs.smoke-test != ''
+        shell: bash
+        env:
+          IMAGE: ${{ env.CANDIDATE }}
+          SMOKE: ${{ inputs.smoke-test }}
+        run: bash "$SMOKE"
+
+      # ---------------------------------------------------------------------
+      # Report: every severity, never fails. This is the human-readable record,
+      # and it puts the trivy binary on PATH and fills the DB cache that the
+      # gate and the diff reuse, so all three judge against the same DB.
+      # ---------------------------------------------------------------------
+      - name: Trivy report (all severities, non-blocking)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.CANDIDATE }}
+          cache-dir: ${{ env.TRIVY_CACHE }}
+          hide-progress: true
+          output: trivy.txt
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW'
+          exit-code: '0'
+
+      - name: Publish Trivy report to the run summary
+        if: always()
+        shell: bash
+        env:
+          NAME: ${{ inputs.image-name }}
+        run: |
+          {
+            echo "### Trivy scan: \`${NAME}\`"
+            echo ""
+            if [[ -s trivy.txt ]]; then
+              echo "<details><summary>Full report</summary>"
+              echo ""
+              echo '```'
+              cat trivy.txt
+              echo '```'
+              echo "</details>"
+            elif [[ -f trivy.txt ]]; then
+              echo "No vulnerabilities detected at any severity."
+            else
+              echo "No report: the scan did not run."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # An artifact rather than a SARIF upload: on a private repository Code
+      # Scanning needs GitHub Advanced Security, and upload-sarif fails hard
+      # without it. On a public repository you can add the SARIF upload (and
+      # `security-events: write`) after the gate.
+      - name: Archive Trivy report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trivy-${{ inputs.image-name }}-${{ github.run_id }}
+          path: trivy.txt
+          retention-days: 30
+          if-no-files-found: ignore
+
+      # ---------------------------------------------------------------------
+      # Gate: fails the build. Only fixable findings block (--ignore-unfixed):
+      # a rebuild should already have pulled those fixes in, so a hit means
+      # something held a patch back. OS packages and language packages get
+      # separate thresholds, because a base image can be held to MEDIUM while
+      # a vendored Go binary's stdlib often can't.
+      #
+      # Nothing that can fail belongs above this step except the build and the
+      # smoke test: a failing step above it skips the gate and the publish.
+      # ---------------------------------------------------------------------
+      - name: Trivy gate
+        shell: bash
+        env:
+          OS_SEV: ${{ inputs.gate-os-severity }}
+          LIB_SEV: ${{ inputs.gate-library-severity }}
+          IGNOREFILE: ${{ inputs.trivyignore }}
+        run: |
+          set -euo pipefail
+          ignore=()
+          if [[ -n "$IGNOREFILE" ]]; then
+            [[ -f "$IGNOREFILE" ]] || { echo "::error::trivyignore $IGNOREFILE not found"; exit 1; }
+            ignore=(--ignorefile "$IGNOREFILE")
+          fi
+          gate() {  # $1 pkg type, $2 severities
+            echo "::group::Gate: $1 packages, fixable $2"
+            trivy image --quiet --scanners vuln --pkg-types "$1" \
+              --cache-dir "$TRIVY_CACHE" --skip-db-update --skip-java-db-update \
+              --severity "$2" --ignore-unfixed ${ignore[@]+"${ignore[@]}"} \
+              --exit-code 1 "$CANDIDATE"
+            echo "::endgroup::"
+          }
+          [[ -n "$OS_SEV" ]] && gate os "$OS_SEV"
+          [[ -n "$LIB_SEV" ]] && gate library "$LIB_SEV"
+          echo "Gate passed."
+
+      # ---------------------------------------------------------------------
+      # Publish. Only reached when the gate passed.
+      # ---------------------------------------------------------------------
+      - name: Log in to the registry
+        if: steps.vars.outputs.push == 'true'
+        shell: bash
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          REG_USER: ${{ secrets.registry-username }}
+          REG_PASS: ${{ secrets.registry-password }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          if [[ "$REGISTRY" == "ghcr.io" && -z "$REG_PASS" ]]; then
+            echo "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          else
+            [[ -n "$REG_USER" && -n "$REG_PASS" ]] \
+              || { echo "::error::registry-username / registry-password are needed for $REGISTRY"; exit 1; }
+            echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
+          fi
+
+      # Packages decide whether to publish; CVEs decide whether to alert. The
+      # package list comes from Trivy rather than dpkg or apk, so it works on
+      # images with no package manager and covers vendored binaries too.
+      - name: Diff against the published image
+        id: diff
+        if: steps.vars.outputs.push == 'true'
+        shell: bash
+        env:
+          SKIP_UNCHANGED: ${{ inputs.skip-unchanged-nightly }}
+        run: |
+          set -uo pipefail
+          PREV="${IMAGE}:latest"
+          trivy_json() {
+            trivy image --quiet --format json --cache-dir "$TRIVY_CACHE" \
+              --skip-db-update --skip-java-db-update "$@"
+          }
+          packages() {
+            trivy_json --list-all-pkgs "$1" \
+              | jq -r '.Results[]? | .Target as $t | .Packages[]? | "\($t) \(.Name) \(.Version)"' \
+              | sort -u
+          }
+          # CVE-level, not row-level: one CVE in seven util-linux packages is
+          # one thing to tell a human about, not seven.
+          cves() {
+            trivy_json --scanners vuln "$1" \
+              | jq -r '[.Results[]?.Vulnerabilities[]? | "\(.VulnerabilityID)|\(.Severity)"] | unique[]' \
+              | sort -u
+          }
+
+          packages "$CANDIDATE" > new_pkgs.txt
+          cves "$CANDIDATE" > new_cves.txt
+          : > resolved.txt
+          : > introduced.txt
+
+          if ! docker pull -q "$PREV" >/dev/null 2>&1; then
+            echo "No published image yet: first publish."
+            printf 'should_push=true\nresolved_count=0\nintroduced_count=0\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          packages "$PREV" > old_pkgs.txt
+          cves "$PREV" > old_cves.txt
+          comm -23 old_cves.txt new_cves.txt > resolved.txt
+          comm -13 old_cves.txt new_cves.txt > introduced.txt
+          RESOLVED=$(wc -l < resolved.txt | tr -d ' ')
+          INTRODUCED=$(wc -l < introduced.txt | tr -d ' ')
+          PKG_DELTA=$(diff old_pkgs.txt new_pkgs.txt | grep -c '^[<>]' || true)
+
+          if [[ "$GITHUB_EVENT_NAME" == "schedule" && "$SKIP_UNCHANGED" == "true" && "$PKG_DELTA" -eq 0 ]]; then
+            SHOULD_PUSH=false; REASON="no package changes"
+          else
+            SHOULD_PUSH=true; REASON="${PKG_DELTA} package line(s) changed"
+          fi
+          {
+            echo "should_push=${SHOULD_PUSH}"
+            echo "resolved_count=${RESOLVED}"
+            echo "introduced_count=${INTRODUCED}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo ""
+            echo "### Change against the published image"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| package lines changed | ${PKG_DELTA} |"
+            echo "| CVEs resolved | ${RESOLVED} |"
+            echo "| CVEs introduced | ${INTRODUCED} |"
+            echo "| publishing | ${SHOULD_PUSH} (${REASON}) |"
+            for f in resolved introduced; do
+              if [[ -s "$f.txt" ]]; then
+                echo ""; echo "${f^}:"; echo '```'; sed 's/|/  /' "$f.txt"; echo '```'
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tag and push
+        id: push
+        if: steps.vars.outputs.push == 'true' && steps.diff.outputs.should_push == 'true'
+        shell: bash
+        env:
+          TAG_LATEST: ${{ inputs.tag-latest }}
+          EXTRA_TAGS: ${{ inputs.extra-tags }}
+        run: |
+          set -euo pipefail
+          # Scheduled runs rebuild the same commit against newer packages, so
+          # they get a date tag: reusing sha-<commit> would overwrite it daily
+          # and stop it meaning "the build of that commit".
+          if [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+            PRIMARY="$(date -u +'%Y%m%d')"
+          else
+            PRIMARY="sha-${GITHUB_SHA::12}"
+          fi
+          TAGS=("$PRIMARY")
+          [[ "$TAG_LATEST" == "true" ]] && TAGS+=(latest)
+          for t in $EXTRA_TAGS; do TAGS+=("$t"); done
+
+          for t in "${TAGS[@]}"; do
+            docker tag "$CANDIDATE" "${IMAGE}:${t}"
+            docker push -q "${IMAGE}:${t}"
+          done
+
+          DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE}:${PRIMARY}")"
+          {
+            echo "primary_tag=${PRIMARY}"
+            echo "tags=${TAGS[*]}"
+            echo "digest=${DIGEST#*@}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo ""
+            echo "### Published"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| image | \`${IMAGE}\` |"
+            echo "| tags | ${TAGS[*]} |"
+            echo "| digest | \`${DIGEST#*@}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Note skipped publish
+        if: steps.vars.outputs.push == 'true' && steps.diff.outputs.should_push == 'false'
+        run: echo "Nightly rebuild produced an identical package set; nothing published." >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------------------------------------------------------------------
+      # Prune (GHCR only). Untagged versions are leftovers from retagging and
+      # go first; then total retained versions are capped. Both keep the
+      # newest N, and the image just pushed is the newest. Two traps:
+      #
+      #   * The packages API can list a version pushed seconds ago with no
+      #     tags yet. With keep-untagged 0, the untagged prune can then delete
+      #     the image it just published. Keep a floor.
+      #   * `ignore-versions` matches the version *name*, which for a
+      #     container is its digest, not its tag. `^latest$` never matches, so
+      #     it is not a protection and is not used.
+      #
+      # The verify step below is the backstop either way.
+      # ---------------------------------------------------------------------
+      - name: Prune untagged versions
+        if: steps.push.outcome == 'success' && inputs.prune && inputs.registry == 'ghcr.io'
+        continue-on-error: true
+        uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
+        with:
+          package-name: ${{ inputs.image-name }}
+          package-type: container
+          delete-only-untagged-versions: true
+          min-versions-to-keep: ${{ inputs.keep-untagged }}
+
+      - name: Prune old versions
+        if: steps.push.outcome == 'success' && inputs.prune && inputs.registry == 'ghcr.io'
+        continue-on-error: true
+        uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
+        with:
+          package-name: ${{ inputs.image-name }}
+          package-type: container
+          min-versions-to-keep: ${{ inputs.keep-versions }}
+
+      # A host tracking `latest` fails its next pull if the prune took the tag.
+      # The local image and its layers are still here, so a missing tag is
+      # re-pushed rather than only reported.
+      - name: Verify published tags
+        id: verify
+        if: steps.push.outcome == 'success'
+        shell: bash
+        env:
+          TAGS: ${{ steps.push.outputs.tags }}
+          WANT: ${{ steps.push.outputs.digest }}
+        run: |
+          set -uo pipefail
+          digest_of() {
+            docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" 2>/dev/null | jq -r '.digest // empty'
+          }
+          BAD=0
+          for t in $TAGS; do
+            GOT="$(digest_of "${IMAGE}:${t}")"
+            if [[ "$GOT" == "$WANT" ]]; then echo "${t}: ok"; continue; fi
+            echo "::warning::${IMAGE}:${t} is '${GOT:-missing}', expected ${WANT}; re-pushing"
+            docker push -q "${IMAGE}:${t}"
+            GOT="$(digest_of "${IMAGE}:${t}")"
+            if [[ "$GOT" != "$WANT" ]]; then
+              echo "::error::${IMAGE}:${t} is still '${GOT:-missing}' after a re-push"
+              BAD=1
+            fi
+          done
+          exit "$BAD"
+
+      # ---------------------------------------------------------------------
+      # Alerts. Optional: with no webhook these steps do nothing.
+      # ---------------------------------------------------------------------
+      - name: Alert - vulnerabilities resolved
+        if: steps.push.outcome == 'success' && steps.diff.outputs.resolved_count != '0'
+        shell: bash
+        env:
+          WEBHOOK: ${{ secrets.discord-webhook }}
+          NAME: ${{ inputs.image-name }}
+          RESOLVED: ${{ steps.diff.outputs.resolved_count }}
+          INTRODUCED: ${{ steps.diff.outputs.introduced_count }}
+          PRIMARY_TAG: ${{ steps.push.outputs.primary_tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          [[ -z "$WEBHOOK" ]] && { echo "No webhook set; skipping."; exit 0; }
+          # The highest resolved severity sets the colour, so an urgent pull
+          # looks different from routine LOW churn.
+          if grep -q '|CRITICAL' resolved.txt; then COLOR=15158332
+          elif grep -q '|HIGH' resolved.txt; then COLOR=15105570
+          else COLOR=3066993; fi
+          LIST=$(sed 's/|/  -  /' resolved.txt | head -20)
+          (( RESOLVED > 20 )) && LIST="${LIST}"$'\n'"... and $(( RESOLVED - 20 )) more"
+          DESC="A rebuild of \`${NAME}\` resolved **${RESOLVED}** vulnerabilities that the previously published image carried. Pull and recreate the container to pick them up."
+          [[ "$INTRODUCED" != "0" ]] && DESC="${DESC}"$'\n\n'"${INTRODUCED} new CVE(s) also appeared; see the run summary."
+          jq -n --arg title "${NAME} updated: ${RESOLVED} vulnerabilities resolved" \
+                --arg desc "$DESC" --arg url "$RUN_URL" --arg tag "${IMAGE}:${PRIMARY_TAG}" \
+                --arg list "$LIST" --argjson color "$COLOR" \
+            '{embeds:[{title:$title, description:$desc, url:$url, color:$color,
+                       fields:[{name:"Image", value:("`" + $tag + "`")},
+                               {name:"Resolved", value:("```\n" + $list + "\n```")}]}]}' \
+          | curl -sS -X POST -H 'Content-Type: application/json' -d @- "$WEBHOOK"
+
+      - name: Alert - build, smoke test, gate or publish failed
+        if: failure() && github.event_name != 'pull_request'
+        shell: bash
+        env:
+          WEBHOOK: ${{ secrets.discord-webhook }}
+          NAME: ${{ inputs.image-name }}
+          VERIFY: ${{ steps.verify.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          [[ -z "$WEBHOOK" ]] && exit 0
+          if [[ "$VERIFY" == "failure" ]]; then
+            TITLE="${NAME}: a published tag is missing after the prune"
+            DESC="The image was pushed but a tag could not be confirmed, even after a re-push. Pulls of that tag will fail until it is fixed."
+          else
+            TITLE="${NAME}: build or security gate failed"
+            DESC="Nothing was published. The build or smoke test broke, or the gate found a fixable vulnerability that is not accepted in the trivyignore file. See the run summary."
+          fi
+          jq -n --arg title "$TITLE" --arg desc "$DESC" --arg url "$RUN_URL" \
+            '{embeds:[{title:$title, description:$desc, url:$url, color:15158332}]}' \
+          | curl -sS -X POST -H 'Content-Type: application/json' -d @- "$WEBHOOK"

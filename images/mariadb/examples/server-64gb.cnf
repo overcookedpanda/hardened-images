@@ -1,0 +1,79 @@
+[mysqld]
+# Performance Schema - Keep disabled for performance
+performance-schema=0
+
+# Storage Engine
+default-storage-engine=InnoDB
+innodb_file_per_table=1
+
+# Connection & Network
+max_allowed_packet=268435456
+open_files_limit=65536
+max_connections=300
+
+# InnoDB Configuration - OPTIMIZED FOR 64GB + MariaDB 12.0
+innodb_buffer_pool_size=51539607552        # 48GB
+innodb_buffer_pool_instances=48
+innodb_log_file_size=4294967296            # 4GB
+innodb_log_buffer_size=134217728           # 128MB
+innodb_flush_log_at_trx_commit=0
+innodb_thread_concurrency=0
+
+# MariaDB 12.0 Enhanced Features
+innodb_io_capacity=1000
+innodb_io_capacity_max=4000
+innodb_lru_scan_depth=2048
+innodb_purge_threads=4
+innodb_read_io_threads=8
+innodb_write_io_threads=8
+
+# New in MariaDB 12.0
+innodb_parallel_read_threads=4             # Enhanced parallelization
+innodb_ddl_threads=4                       # Parallel DDL operations
+
+# Buffer Settings
+join_buffer_size=2097152                   # 2MB
+sort_buffer_size=16777216                  # 16MB
+read_rnd_buffer_size=16777216              # 16MB
+read_buffer_size=1048576                   # 1MB
+bulk_insert_buffer_size=67108864           # 64MB
+
+# Thread & Table Settings
+thread_cache_size=100
+table_open_cache=4000
+table_definition_cache=2000
+
+# Temp Table Settings - Your specified 48MB
+tmp_table_size=50331648                    # 48MB
+max_heap_table_size=50331648               # 48MB
+
+# Query Cache - Keep disabled
+query_cache_size=0
+query_cache_type=0
+
+# Logging - Disabled as requested
+slow_query_log=0
+long_query_time=2.000000
+
+# Character Set - MariaDB 12.0 defaults to utf8mb4
+character_set_server=utf8mb4
+collation_server=utf8mb4_unicode_ci
+init_connect='SET NAMES utf8mb4'
+
+# MariaDB 12.0 Enhanced Optimizer
+optimizer_use_condition_selectivity=4      # Enhanced in 12.0
+optimizer_switch='semijoin=on,materialization=on,firstmatch=on,loosescan=on,condition_pushdown_for_derived=on'
+
+# Standard InnoDB settings
+innodb_adaptive_flushing=ON
+innodb_adaptive_hash_index=ON
+innodb_doublewrite=ON
+innodb_old_blocks_time=1000
+innodb_read_ahead_threshold=56
+innodb_stats_on_metadata=OFF
+innodb_stats_persistent=ON
+
+# Connection handling
+back_log=150
+interactive_timeout=28800
+wait_timeout=28800

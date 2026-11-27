@@ -1,0 +1,4 @@
+# Accepted exceptions for the hardened nginx-proxy Trivy gate
+# (.github/workflows/nginx-proxy.yml). One ID per line, each
+# with the reason and the date it was accepted. Empty on purpose: add an entry
+# only for a finding nothing in this repo can fix.
