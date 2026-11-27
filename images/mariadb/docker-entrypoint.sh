@@ -28,10 +28,11 @@ done
 
 # Initialize database if needed
 if [ ! -d "/var/lib/mysql/mysql" ]; then
-    log "Initializing MariaDB 12.0 database..."
+    log "Initializing MariaDB database..."
 
-    # Initialize database with MariaDB 12.0 command
-    $MYSQL_INSTALL_BIN --user=mysql --datadir=/var/lib/mysql
+    # No test database. The anonymous accounts it would also leave are dropped
+    # below, once the temporary server is up.
+    $MYSQL_INSTALL_BIN --user=mysql --datadir=/var/lib/mysql --skip-test-db
 
     # Start mariadbd temporarily for setup
     $MYSQLD_BIN --user=mysql --datadir=/var/lib/mysql --skip-networking --socket=/tmp/mysql_init.sock &
@@ -51,6 +52,12 @@ if [ ! -d "/var/lib/mysql/mysql" ]; then
         log "ERROR: Failed to start temporary server"
         exit 1
     fi
+
+    # mariadb-install-db creates anonymous accounts (''@localhost and
+    # ''@<hostname>). A client connecting from localhost matches them before
+    # 'user'@'%', so MYSQL_USER could not log in over 127.0.0.1. They are also
+    # an unauthenticated way in, so drop them.
+    $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "DELETE FROM mysql.global_priv WHERE User=''; FLUSH PRIVILEGES;"
 
     # Set root password
     if [ -n "$MYSQL_ROOT_PASSWORD" ]; then

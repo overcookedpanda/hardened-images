@@ -4,7 +4,8 @@
 #   IMAGE=hardened-mariadb:dev images/mariadb/smoke-test.sh
 #
 # Checks that the image still is a working MariaDB, not just that it builds:
-#   * hardening: runs as mysql, no setuid/setgid binaries, no curl or gnupg;
+#   * hardening: runs as mysql, no setuid/setgid binaries, no curl or gnupg,
+#     no anonymous accounts;
 #   * first start initialises the data directory, sets the root password and
 #     creates MYSQL_DATABASE and MYSQL_USER;
 #   * the app user can connect over TCP and write to its database;
@@ -48,6 +49,8 @@ q 'CREATE TABLE t (id INT PRIMARY KEY); INSERT INTO t VALUES (42);'
 got="$(q 'SELECT id FROM t')"
 [[ "$got" == 42 ]] || { echo "::error::app user could not write and read back (got '$got')"; exit 1; }
 docker exec "$NAME" mariadb -h 127.0.0.1 -uroot -psmoke-root -N -e 'SELECT VERSION()'
+anon="$(docker exec "$NAME" mariadb -h 127.0.0.1 -uroot -psmoke-root -N -e "SELECT COUNT(*) FROM mysql.global_priv WHERE User=''")"
+[[ "$anon" == 0 ]] || { echo "::error::$anon anonymous account(s) present"; exit 1; }
 
 PID1_UID="$(docker exec "$NAME" sh -c "awk '/^Uid:/{print \$2}' /proc/1/status")"
 MYSQL_UID="$(docker exec "$NAME" id -u mysql)"
