@@ -115,9 +115,16 @@ printf 'echo "failing on purpose"; false\n' > "$INIT_DIR/fail.sh"
 chmod 755 "$INIT_DIR"; chmod 644 "$INIT_DIR/fail.sh"
 docker run -d --name "$NAME" -e MYSQL_ROOT_PASSWORD=smoke-root \
   -v "$INIT_DIR:/docker-entrypoint-initdb.d:ro" "$IMG" >/dev/null
-[[ "$(docker wait "$NAME")" != 0 ]] || { echo "::error::setup with a failing init script did not fail"; exit 1; }
+# The container must exit non-zero; a bounded wait so a regression that keeps
+# it running fails here instead of hanging the job.
+expect_failed_exit() {
+  local rc
+  rc="$(timeout 120 docker wait "$NAME")" || { echo "::error::$1 (still running after 120s)"; exit 1; }
+  [[ "$rc" != 0 ]] || { echo "::error::$1"; exit 1; }
+}
+expect_failed_exit "setup with a failing init script did not fail"
 docker start "$NAME" >/dev/null
-[[ "$(docker wait "$NAME")" != 0 ]] || { echo "::error::container started after a failed setup"; exit 1; }
+expect_failed_exit "container started after a failed setup"
 docker logs "$NAME" 2>&1 | grep -q 'earlier initialization of /var/lib/mysql did not finish' \
   || { echo "::error::restart after a failed setup did not refuse with the expected message"; exit 1; }
 
