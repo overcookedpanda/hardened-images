@@ -8,12 +8,15 @@
 #     no anonymous accounts;
 #   * the image ships an empty /var/lib/mysql, and first start initialises
 #     it, sets the root password and creates MYSQL_DATABASE and MYSQL_USER;
-#   * the app user can connect over TCP and write to its database;
+#   * the app user, whose password has a quote and a backslash, can connect
+#     over TCP and write to its database;
 #   * the HEALTHCHECK goes healthy;
 #   * `docker stop` shuts mariadbd down cleanly well inside the 10 s kill.
 set -euo pipefail
 IMG="${IMAGE:?set IMAGE to the image to test}"
 NAME=mariadb-smoke
+# A quote and a backslash, so the entrypoint's SQL quoting is exercised.
+APP_PW="smoke'app\\pw"
 trap 'rc=$?; (( rc )) && docker logs "$NAME" 2>&1 | tail -80; docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
 
 user="$(docker inspect -f '{{.Config.User}}' "$IMG")"
@@ -33,7 +36,7 @@ SUID="$(docker run --rm --entrypoint sh "$IMG" -c 'find /usr/bin /usr/sbin /bin 
 
 docker run -d --name "$NAME" \
   -e MYSQL_ROOT_PASSWORD=smoke-root -e MYSQL_DATABASE=smoke \
-  -e MYSQL_USER=app -e MYSQL_PASSWORD=smoke-app \
+  -e MYSQL_USER=app -e MYSQL_PASSWORD="$APP_PW" \
   --health-interval=2s --health-start-period=5s "$IMG" >/dev/null
 
 for i in $(seq 1 60); do
@@ -47,7 +50,7 @@ done
 
 # The entrypoint's temporary init server can answer ping before the real one
 # listens on TCP, so retry the first TCP query briefly.
-q() { docker exec "$NAME" mariadb -h 127.0.0.1 -uapp -psmoke-app smoke -N -e "$1"; }
+q() { docker exec "$NAME" mariadb -h 127.0.0.1 -uapp "-p$APP_PW" smoke -N -e "$1"; }
 for i in $(seq 1 15); do q 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done
 q 'CREATE TABLE t (id INT PRIMARY KEY); INSERT INTO t VALUES (42);'
 got="$(q 'SELECT id FROM t')"

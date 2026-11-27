@@ -27,6 +27,12 @@ for binary in $MYSQLD_BIN $MYSQLADMIN_BIN $MYSQL_BIN $MYSQL_INSTALL_BIN; do
 done
 
 # Initialize database if needed
+# Quote a value as an SQL string literal (escapes \ and ') and an identifier
+# (doubles backticks), so a password or name with those characters can't
+# break, or inject into, the setup statements.
+sql_str() { local v=${1//\\/\\\\}; printf "'%s'" "${v//\'/\'\'}"; }
+sql_id()  { printf '`%s`' "${1//\`/\`\`}"; }
+
 if [ ! -d "/var/lib/mysql/mysql" ]; then
     log "Initializing MariaDB database..."
 
@@ -62,22 +68,22 @@ if [ ! -d "/var/lib/mysql/mysql" ]; then
     # Set root password
     if [ -n "$MYSQL_ROOT_PASSWORD" ]; then
         log "Setting root password..."
-        $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$MYSQL_ROOT_PASSWORD';"
+        $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "ALTER USER 'root'@'localhost' IDENTIFIED BY $(sql_str "$MYSQL_ROOT_PASSWORD");"
 
         # Create root user for external access
-        $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '$MYSQL_ROOT_PASSWORD';"
+        $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY $(sql_str "$MYSQL_ROOT_PASSWORD");"
         $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;"
     fi
 
     # Create database and user if specified
     if [ -n "$MYSQL_DATABASE" ]; then
         log "Creating database: $MYSQL_DATABASE"
-        $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "CREATE DATABASE IF NOT EXISTS \`$MYSQL_DATABASE\`;"
+        $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "CREATE DATABASE IF NOT EXISTS $(sql_id "$MYSQL_DATABASE");"
 
         if [ -n "$MYSQL_USER" ] && [ -n "$MYSQL_PASSWORD" ]; then
             log "Creating user: $MYSQL_USER"
-            $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "CREATE USER IF NOT EXISTS '$MYSQL_USER'@'%' IDENTIFIED BY '$MYSQL_PASSWORD';"
-            $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "GRANT ALL PRIVILEGES ON \`$MYSQL_DATABASE\`.* TO '$MYSQL_USER'@'%';"
+            $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "CREATE USER IF NOT EXISTS $(sql_str "$MYSQL_USER")@'%' IDENTIFIED BY $(sql_str "$MYSQL_PASSWORD");"
+            $MYSQL_BIN --socket=/tmp/mysql_init.sock -e "GRANT ALL PRIVILEGES ON $(sql_id "$MYSQL_DATABASE").* TO $(sql_str "$MYSQL_USER")@'%';"
         fi
     fi
 

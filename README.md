@@ -58,9 +58,9 @@ and [docs/pipeline.md](docs/pipeline.md) for why each step is there.
    After the first publish, make each package public under **Packages →
    Package settings** if the repository is public.
 
-The image workflows run nightly. On a private repository that spends Actions
-minutes, so disable the schedules (or the workflows) there if you only want
-manual runs.
+On a private repository every run spends Actions minutes, the nightly
+schedules included. For manual runs only, cut the `on:` block of each caller
+workflow down to `workflow_dispatch`.
 
 ## License
 
