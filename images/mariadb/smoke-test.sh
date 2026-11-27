@@ -12,12 +12,15 @@
 #     over TCP and write to its database;
 #   * the HEALTHCHECK goes healthy;
 #   * `docker stop` shuts mariadbd down cleanly well inside the 10 s kill.
+#   * with NO_BACKSLASH_ESCAPES set in a mounted config, a root password with
+#     a backslash still works.
 set -euo pipefail
 IMG="${IMAGE:?set IMAGE to the image to test}"
 NAME=mariadb-smoke
 # A quote and a backslash, so the entrypoint's SQL quoting is exercised.
 APP_PW="smoke'app\\pw"
-trap 'rc=$?; (( rc )) && docker logs "$NAME" 2>&1 | tail -80; docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
+CONF_DIR="$(mktemp -d)"
+trap 'rc=$?; (( rc )) && docker logs "$NAME" 2>&1 | tail -80; docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$CONF_DIR"' EXIT
 
 user="$(docker inspect -f '{{.Config.User}}' "$IMG")"
 [[ "$user" == mysql ]] || { echo "::error::$IMG runs as '${user:-root}', expected mysql"; exit 1; }
@@ -39,14 +42,18 @@ docker run -d --name "$NAME" \
   -e MYSQL_USER=app -e MYSQL_PASSWORD="$APP_PW" \
   --health-interval=2s --health-start-period=5s "$IMG" >/dev/null
 
-for i in $(seq 1 60); do
-  status="$(docker inspect -f '{{.State.Health.Status}}' "$NAME")"
-  [[ "$status" == healthy ]] && { echo "healthy after ~$(( i * 2 ))s"; break; }
-  [[ "$(docker inspect -f '{{.State.Running}}' "$NAME")" == true ]] \
-    || { echo "::error::mariadb exited"; exit 1; }
-  (( i == 60 )) && { echo "::error::not healthy after 120s ($status)"; exit 1; }
-  sleep 2
-done
+wait_healthy() {
+  local i status
+  for i in $(seq 1 60); do
+    status="$(docker inspect -f '{{.State.Health.Status}}' "$NAME")"
+    [[ "$status" == healthy ]] && { echo "healthy after ~$(( i * 2 ))s"; return 0; }
+    [[ "$(docker inspect -f '{{.State.Running}}' "$NAME")" == true ]] \
+      || { echo "::error::mariadb exited"; exit 1; }
+    (( i == 60 )) && { echo "::error::not healthy after 120s ($status)"; exit 1; }
+    sleep 2
+  done
+}
+wait_healthy
 
 # The entrypoint's temporary init server can answer ping before the real one
 # listens on TCP, so retry the first TCP query briefly.
@@ -70,4 +77,22 @@ echo "docker stop took ${took}s"
 (( took < 9 )) || { echo "::error::SIGTERM not handled (stop took ${took}s)"; exit 1; }
 docker logs "$NAME" 2>&1 | grep -qiE 'shutdown complete' \
   || { echo "::error::no clean shutdown in the log"; exit 1; }
+docker rm -f "$NAME" >/dev/null
+
+# A mounted config may set NO_BACKSLASH_ESCAPES; the entrypoint's escaping must
+# still hand MariaDB the password exactly as given.
+ROOT_PW='smoke\root'
+printf '[mysqld]\nsql_mode=NO_BACKSLASH_ESCAPES\n' > "$CONF_DIR/sql-mode.cnf"
+chmod 755 "$CONF_DIR"; chmod 644 "$CONF_DIR/sql-mode.cnf"
+docker run -d --name "$NAME" -e MYSQL_ROOT_PASSWORD="$ROOT_PW" \
+  -v "$CONF_DIR:/etc/mysql/conf.d:ro" \
+  --health-interval=2s --health-start-period=5s "$IMG" >/dev/null
+wait_healthy
+rq() { docker exec "$NAME" mariadb -h 127.0.0.1 -uroot "-p$ROOT_PW" -N -e "$1"; }
+for i in $(seq 1 15); do rq 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done
+mode="$(rq 'SELECT @@GLOBAL.sql_mode')" \
+  || { echo "::error::root password with a backslash rejected under NO_BACKSLASH_ESCAPES"; exit 1; }
+[[ "$mode" == *NO_BACKSLASH_ESCAPES* ]] \
+  || { echo "::error::mounted config not applied (sql_mode '$mode')"; exit 1; }
+
 echo "MariaDB smoke test passed."
