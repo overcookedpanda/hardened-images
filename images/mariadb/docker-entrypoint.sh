@@ -33,6 +33,10 @@ done
 sql_str() { local v=${1//\\/\\\\}; printf "'%s'" "${v//\'/\'\'}"; }
 # shellcheck disable=SC2016 # the backticks are literal
 sql_id()  { printf '`%s`' "${1//\`/\`\`}"; }
+# A database name as a GRANT pattern: _ and % are wildcards there, so escape
+# them to match only that database.
+# shellcheck disable=SC2016 # the backticks are literal
+sql_db_pattern() { local v=${1//_/\\_}; v=${v//%/\\%}; printf '`%s`' "${v//\`/\`\`}"; }
 # Run one setup statement on the temporary server. sql_str's backslash
 # escaping assumes backslashes are escape characters, so clear
 # NO_BACKSLASH_ESCAPES for this session if a mounted config turns it on; the
@@ -91,7 +95,7 @@ if [ ! -d "/var/lib/mysql/mysql" ]; then
         if [ -n "$MYSQL_USER" ] && [ -n "$MYSQL_PASSWORD" ]; then
             log "Creating user: $MYSQL_USER"
             setup_sql "CREATE USER IF NOT EXISTS $(sql_str "$MYSQL_USER")@'%' IDENTIFIED BY $(sql_str "$MYSQL_PASSWORD");"
-            setup_sql "GRANT ALL PRIVILEGES ON $(sql_id "$MYSQL_DATABASE").* TO $(sql_str "$MYSQL_USER")@'%';"
+            setup_sql "GRANT ALL PRIVILEGES ON $(sql_db_pattern "$MYSQL_DATABASE").* TO $(sql_str "$MYSQL_USER")@'%';"
         fi
     fi
 

@@ -5,7 +5,7 @@
 #
 # Checks that the image still is a working MariaDB, not just that it builds:
 #   * hardening: runs as mysql, no setuid/setgid binaries, no curl or gnupg,
-#     no anonymous accounts;
+#     no anonymous accounts, and the app grant covers only its own database;
 #   * the image ships an empty /var/lib/mysql, and first start initialises
 #     it, sets the root password and creates MYSQL_DATABASE and MYSQL_USER;
 #   * the app user, whose password has a quote and a backslash, can connect
@@ -38,7 +38,7 @@ SUID="$(docker run --rm --entrypoint sh "$IMG" -c 'find /usr/bin /usr/sbin /bin 
 [[ -z "$SUID" ]] || { echo "::error::setuid/setgid binaries present:"; echo "$SUID"; exit 1; }
 
 docker run -d --name "$NAME" \
-  -e MYSQL_ROOT_PASSWORD=smoke-root -e MYSQL_DATABASE=smoke \
+  -e MYSQL_ROOT_PASSWORD=smoke-root -e MYSQL_DATABASE=smoke_db \
   -e MYSQL_USER=app -e MYSQL_PASSWORD="$APP_PW" \
   --health-interval=2s --health-start-period=5s "$IMG" >/dev/null
 
@@ -57,7 +57,7 @@ wait_healthy
 
 # The entrypoint's temporary init server can answer ping before the real one
 # listens on TCP, so retry the first TCP query briefly.
-q() { docker exec "$NAME" mariadb -h 127.0.0.1 -uapp "-p$APP_PW" smoke -N -e "$1"; }
+q() { docker exec "$NAME" mariadb -h 127.0.0.1 -uapp "-p$APP_PW" smoke_db -N -e "$1"; }
 for i in $(seq 1 15); do q 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done
 q 'CREATE TABLE t (id INT PRIMARY KEY); INSERT INTO t VALUES (42);'
 got="$(q 'SELECT id FROM t')"
@@ -65,6 +65,12 @@ got="$(q 'SELECT id FROM t')"
 docker exec "$NAME" mariadb -h 127.0.0.1 -uroot -psmoke-root -N -e 'SELECT VERSION()'
 anon="$(docker exec "$NAME" mariadb -h 127.0.0.1 -uroot -psmoke-root -N -e "SELECT COUNT(*) FROM mysql.global_priv WHERE User=''")"
 [[ "$anon" == 0 ]] || { echo "::error::$anon anonymous account(s) present"; exit 1; }
+# The grant on smoke_db must not spread to a database matching smoke_db as a
+# pattern (_ is a wildcard in GRANT).
+docker exec "$NAME" mariadb -h 127.0.0.1 -uroot -psmoke-root -e 'CREATE DATABASE smokeXdb'
+if docker exec "$NAME" mariadb -h 127.0.0.1 -uapp "-p$APP_PW" smokeXdb -e 'SELECT 1' >/dev/null 2>&1; then
+  echo "::error::app user's grant also covers smokeXdb"; exit 1
+fi
 
 PID1_UID="$(docker exec "$NAME" sh -c "awk '/^Uid:/{print \$2}' /proc/1/status")"
 MYSQL_UID="$(docker exec "$NAME" id -u mysql)"
