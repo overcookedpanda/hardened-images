@@ -1,0 +1,59 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+early_access: false
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  review_status: true
+  collapse_walkthrough: true
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches: [ main ]
+  path_filters:
+    # Vendored upstream files, refreshed by update-upstream.sh, not hand-edited.
+    - '!images/*/upstream/**'
+    - '!images/nginx-proxy/tools/go.sum'
+  path_instructions:
+    - path: '.github/workflows/**'
+      instructions: >-
+        Every third-party action must be pinned to a full commit SHA with the
+        version in a trailing comment. Jobs get the least permissions they need,
+        set per job with `permissions: {}` at the top. In the reusable workflow,
+        nothing that can fail may run between the smoke test and the Trivy gate,
+        and the image that is pushed must be the image that was scanned.
+        Flag untrusted input (PR titles, branch names, inputs) used directly in
+        `run:` scripts instead of through `env:`.
+    - path: 'images/**/Dockerfile'
+      instructions: >-
+        These images are hardened drop-in replacements. Flag anything that adds
+        a shell, package manager, curl, wget, openssl or setuid binary to a
+        runtime stage, runs as root at runtime, or downloads without a checksum
+        or pinned version. Base images should be pinned to a version tag.
+    - path: 'images/**/smoke-test.sh'
+      instructions: >-
+        Smoke tests take the image from $IMAGE, must exit non-zero on any
+        failure (set -euo pipefail), must clean up their containers in an EXIT
+        trap, and should check behaviour, not just that a container starts.
+    - path: 'images/nginx-proxy/patches/**'
+      instructions: >-
+        Patches against upstream nginx.tmpl. Check that they still apply to the
+        vendored upstream/nginx.tmpl and keep upstream behaviour unless the
+        README says otherwise.
+  tools:
+    shellcheck:
+      enabled: true
+    actionlint:
+      enabled: true
+    hadolint:
+      enabled: true
+    gitleaks:
+      enabled: true
+    markdownlint:
+      enabled: true
+
+chat:
+  auto_reply: true
