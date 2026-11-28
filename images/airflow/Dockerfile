@@ -72,13 +72,16 @@ RUN PY="$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')" && \
         "apache-airflow[statsd,postgres]==${AIRFLOW_VERSION}" \
         --constraint /tmp/constraints-upstream.txt
 
-# Security floors above the constraints, each for a fixable CRITICAL the
-# constraint pin would otherwise keep: PyJWT (auth bypass, CVE-2026-102268),
-# anyio (TLS spoofing, CVE-2026-63374), certifi (compromised emSign root,
-# GHSA-6q48-6c7w-9gw2). All are minor or patch moves inside the ranges Airflow
-# and FAB declare; `pip check` fails the build if one stops being compatible.
+# Security pins above the constraints, each for a fixable CRITICAL the
+# constraint pin would otherwise keep. Exact versions so the build is
+# reproducible; each must stay at or above its floor:
+#   PyJWT   >= 2.14.0      auth bypass, CVE-2026-102268
+#   anyio   >= 4.14.2      TLS spoofing, CVE-2026-63374
+#   certifi >= 2026.10.18  compromised emSign root, GHSA-6q48-6c7w-9gw2
+# All are minor or patch moves inside the ranges Airflow and FAB declare;
+# `pip check` fails the build if one stops being compatible.
 RUN pip install --no-cache-dir \
-        "PyJWT>=2.14.0" "anyio>=4.14.2" "certifi>=2026.10.18" && \
+        "PyJWT==2.15.1" "anyio==4.16.0" "certifi==2026.11.20" && \
     pip check
 
 # uv ships with the base only to speed up its own build; Airflow falls back to
@@ -96,7 +99,7 @@ RUN pip uninstall -y uv && \
 
 # Constraints for derived images: Airflow's file with every installed package
 # pinned to the version in this image. Installing with the upstream file
-# instead would downgrade the security floors above.
+# instead would downgrade the security pins above.
 COPY merge-constraints.py /tmp/merge-constraints.py
 RUN python /tmp/merge-constraints.py /tmp/constraints-upstream.txt > /tmp/constraints.txt
 

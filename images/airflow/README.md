@@ -30,7 +30,7 @@ line; the full list is in each run's report). Tags: `sha-<12>`,
 | SQL Server ODBC driver | removed, with Microsoft's apt repo: its updates need Microsoft's EULA accepted |
 | uv | uninstalled; pip is the installer, as Airflow falls back to it anyway |
 | Kubernetes provider | kept out, and the build fails if an extra pulls it in: while installed it adds roughly 90 MB to every Airflow process |
-| Python packages | `postgres` and `statsd` extras added (the slim image can't reach a Postgres metadata database), all pinned to Airflow's constraints, plus security floors for PyJWT, anyio and certifi |
+| Python packages | `postgres` and `statsd` extras added (the slim image can't reach a Postgres metadata database), all pinned to Airflow's constraints, plus security pins for PyJWT, anyio and certifi above the constraints |
 | Constraints | `/opt/hardened-airflow/constraints.txt` pins what the image has, for derived images (see below) |
 | User | `airflow` (uid 50000, gid 0), as upstream; an arbitrary uid with gid 0 still works |
 
@@ -76,18 +76,21 @@ services:
     volumes:
       - pg-data:/var/lib/postgresql/data
 
+  # Migrates the database and creates the admin user, and fails if either
+  # fails. (The entrypoint's _AIRFLOW_DB_MIGRATE and _AIRFLOW_WWW_USER_CREATE
+  # ignore errors, so a broken migration would still let the other services
+  # start.) Safe to rerun: creating a user that exists is a no-op.
   airflow-init:
     <<: *airflow
-    command: version
+    command:
+      - bash
+      - -euc
+      - |
+        airflow db migrate
+        airflow users create --role Admin --username admin \
+          --password change-me-three --firstname Admin --lastname User \
+          --email admin@example.com
     depends_on: [ postgres ]
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:change-me@postgres/airflow
-      AIRFLOW__CORE__FERNET_KEY: change-me
-      _AIRFLOW_DB_MIGRATE: "true"
-      _AIRFLOW_WWW_USER_CREATE: "true"
-      _AIRFLOW_WWW_USER_USERNAME: admin
-      _AIRFLOW_WWW_USER_PASSWORD: change-me-three
 
   webserver:
     <<: *airflow
@@ -145,7 +148,7 @@ pymysql
 That file is Airflow's constraints for this release with every package in
 the image pinned to the version the image has, Airflow itself included. Use
 it rather than the upstream constraints URL: the upstream file would
-downgrade the security floors listed above. A package it doesn't list gets
+downgrade the security pins listed above. A package it doesn't list gets
 its latest compatible version, and `pip check` catches a conflict.
 
 Need a Debian package? Switch to `USER root` for the `apt-get install`, then
@@ -173,9 +176,16 @@ them down on SIGTERM.
 
 - **Debian packages**: nothing to do; the nightly rebuild picks them up and
   publishes only when the package set changed.
-- **Airflow 2.x patch and minor releases**: Dependabot (docker), weekly. The
-  constraints URL follows the base image's `AIRFLOW_VERSION`, so only the
-  `FROM` line and the `extra-tags` value in
-  `.github/workflows/airflow.yml` change. Review the security floors and
-  `.trivyignore`; drop a floor once the constraints reach it.
+- **Airflow 2.x patch and minor releases**: Dependabot (docker), weekly, opens
+  the PR with the new `FROM` line. The constraints URL follows the base
+  image's `AIRFLOW_VERSION`, so the Dockerfile needs nothing else. In the same
+  PR, change the version everywhere else it appears: the `extra-tags` value in
+  `.github/workflows/airflow.yml`, and the pull, Compose, derived-image and
+  docs-link examples in this README and the root README
+  (`grep -rn 2.11.2 README.md images/airflow .github/workflows/airflow.yml`
+  finds them). Review the security pins and `.trivyignore`; drop a pin once
+  the constraints reach its floor.
+- **Security pins (PyJWT, anyio, certifi)**: exact versions, so no update
+  arrives on its own. Move a pin up when a newer release fixes something, and
+  keep it at or above the floor named in the Dockerfile.
 - **Airflow 3**: a separate image. Dependabot ignores major bumps.
