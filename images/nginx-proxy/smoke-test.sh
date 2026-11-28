@@ -99,9 +99,10 @@ hc_case() {
   local name="$1" listener="$2"; shift 2
   docker run -d --name np-smoke-hc --network np-smoke \
     -v /var/run/docker.sock:/tmp/docker.sock:ro "$@" "$IMG" >/dev/null
-  local ok=false
+  local ok=false conf
   for _ in $(seq 1 30); do
-    if docker exec np-smoke-hc nginx -T 2>/dev/null | grep -qE "$listener" \
+    conf="$(docker exec np-smoke-hc nginx -T 2>/dev/null || true)"
+    if grep -qE "$listener" <<< "$conf" \
       && docker exec np-smoke-hc /app/healthcheck.sh 2>/dev/null; then
       ok=true; break
     fi
@@ -130,7 +131,9 @@ docker run -d --name np-backend-port --network np-smoke \
   "$BACKEND_IMAGE" >/dev/null
 hc_case "a DEFAULT_HOST on EXTERNAL_HTTP_PORT=8082" 'listen 8082 default_server' \
   -e DEFAULT_HOST=port.test
-if docker exec np-smoke-hc nginx -T 2>/dev/null | grep -qE '^ *listen 80[ ;]'; then
+CONF="$(docker exec np-smoke-hc nginx -T 2>/dev/null)" \
+  || { echo "::error::could not read the config with DEFAULT_HOST on 8082"; docker logs np-smoke-hc; exit 1; }
+if grep -qE '^ *listen 80[ ;]' <<< "$CONF"; then
   echo "::error::expected no listener on port 80 with DEFAULT_HOST on 8082"; exit 1
 fi
 docker rm -f np-smoke-hc np-backend-port >/dev/null
