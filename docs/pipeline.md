@@ -108,8 +108,13 @@ A scan says nothing about whether the image still works. Each image has a
 - **acme-companion**: issues a real certificate from Pebble over HTTP-01
   through nginx-proxy, which then serves it; dropped tools are gone; acme.sh
   and docker-gen are the pinned versions.
+- **airflow**: parses and runs a Bash and Python DAG, migrates a real
+  Postgres metadata database, brings up the webserver and scheduler until
+  `/health` reports both healthy, and starts as an arbitrary uid; no sudo,
+  setuid binaries, docker CLI or uv; the shipped constraints file matches
+  what is installed.
 
-All three check that `docker stop` finishes well inside the 10 second kill,
+All four check that `docker stop` finishes well inside the 10 second kill,
 which catches a PID 1 that ignores SIGTERM.
 
 ## Supply chain

@@ -1,0 +1,10 @@
+# Accepted exceptions for the hardened-airflow Trivy gate
+# (.github/workflows/airflow.yml). Each entry needs a reason and the condition
+# that retires it; keep this list short.
+
+# apache-airflow 2.11.2: code execution through unsafe deserialization of
+# serialized DAGs. Fixed only in Airflow 3.3.0, which is a migration (DAG and
+# REST API changes), not a bump. Exploiting it needs write access to the
+# serialized DAG table or the DAGs folder, which only the operator should have.
+# Remove when the image moves to Airflow 3.
+CVE-2026-33264
