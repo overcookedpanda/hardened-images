@@ -24,6 +24,9 @@ Change the image and recreate the container. Your certificates, `vhost.d`,
 - If you mounted your own `nginx.tmpl` to work around upstream's HTTP/2
   handling, drop it: the template here honours `ENABLE_HTTP2` (see below).
 - If you rely on OCSP stapling, set `ENABLE_OCSP_STAPLING=true` (see below).
+- The image has a `HEALTHCHECK`, so `docker ps` shows it as healthy and
+  `depends_on: condition: service_healthy` works. A `healthcheck:` in your
+  compose file still overrides it.
 - Rolling back is the same in reverse: put the upstream image back.
 
 ## What's in it
@@ -37,6 +40,7 @@ Change the image and recreate the container. Your certificates, `vhost.d`,
 | Entrypoint | bash | the same logic in POSIX sh ([`docker-entrypoint.sh`](docker-entrypoint.sh)) |
 | `nginx.tmpl` | upstream | upstream + [`patches/`](patches/) (the fallback server honours `ENABLE_HTTP2`; OCSP stapling is opt-in) |
 | User | root, nginx workers as `nginx` | the same (workers are uid 65532) |
+| `HEALTHCHECK` | none | `nginx -t` plus any HTTP answer on `:80` (busybox `wget`), every 30 s |
 
 ### OCSP stapling is off by default
 

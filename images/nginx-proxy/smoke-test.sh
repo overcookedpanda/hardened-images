@@ -8,6 +8,7 @@
 #   * docker-gen picks up a container with VIRTUAL_HOST and nginx routes to it,
 #     and drops it again when the container goes away (fallback answers 503);
 #   * the template patch holds: ENABLE_HTTP2=false leaves no `http2 on`;
+#   * the image's HEALTHCHECK command passes on a serving container;
 #   * the reload command acme-companion execs in this container works;
 #   * `docker stop` is handled well under the 10 s kill.
 #
@@ -50,6 +51,12 @@ expect() {
 }
 
 expect unknown.test 503
+
+# The image's HEALTHCHECK command passes while only the fallback (503) answers.
+HC="$(docker inspect -f '{{join .Config.Healthcheck.Test " "}}' np-smoke)"
+[[ "$HC" == CMD-SHELL* ]] || { echo "::error::no HEALTHCHECK in the image ($HC)"; exit 1; }
+docker exec np-smoke sh -c "${HC#CMD-SHELL }" \
+  || { echo "::error::the HEALTHCHECK command fails on a serving nginx-proxy"; exit 1; }
 
 # A backend declared the usual way: VIRTUAL_HOST/PORT on a
 # shared network. DHI nginx serves its welcome page on 8080.
