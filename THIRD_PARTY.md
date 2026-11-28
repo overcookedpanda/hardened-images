@@ -12,6 +12,7 @@ projects, which keep their own licenses:
 | forego | built from source in the nginx-proxy image | Apache-2.0 |
 | acme.sh | downloaded and checksum-verified at build time | GPL-3.0 |
 | MariaDB | installed from the MariaDB apt repository | GPL-2.0 |
+| Apache Airflow | the official `apache/airflow` slim image, with packages from PyPI | Apache-2.0 |
 | nginx | from the Docker Hardened Image base | BSD-2-Clause |
 | Docker Hardened Images (`dhi.io`) | base and builder images | Apache-2.0 |
 
