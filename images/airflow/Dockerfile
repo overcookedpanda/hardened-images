@@ -34,7 +34,10 @@ USER root
 # * full-upgrade, not upgrade: plain `upgrade` holds back a fix that changes
 #   dependencies, and the base layer lags Debian's security updates.
 # * `--error-on=any`: by default a repository that fails to download is only a
-#   warning, and the build quietly upgrades nothing.
+#   warning, and the build quietly upgrades nothing from it.
+# * ca-certificates first: the base image's CA bundle can't verify the
+#   MariaDB repository's mirror, so the strict update needs the current bundle
+#   from Debian before it can read that repository.
 #
 # The base image's SHELL sets pipefail, so `|| true` keeps "nothing matched"
 # from failing the build.
@@ -43,6 +46,8 @@ RUN { dpkg-query -W -f '${Package}\n' 'msodbcsql*' 'mssql-tools*' docker-ce-cli 
     { grep -rlZ -e packages.microsoft.com -e download.docker.com /etc/apt/sources.list.d/ 2>/dev/null || true; } \
         | xargs -0 -r rm -f && \
     rm -f /etc/apt/keyrings/docker.asc && \
+    apt-get update && \
+    apt-get install -y --only-upgrade ca-certificates && \
     apt-get update --error-on=any && \
     apt-get full-upgrade -y && \
     apt-get autoremove -y --purge && \
