@@ -91,27 +91,36 @@ expect app.test 200
 docker rm -f np-backend >/dev/null
 expect app.test 503
 
-# The HEALTHCHECK passes on a fresh container started with the given args.
+# The HEALTHCHECK passes on a fresh container started with the given args,
+# once docker-gen has written the config: nginx starts on its startup config,
+# so a case only counts after `nginx -T` shows the listener it is about
+# (extended regex in $2).
 hc_case() {
-  local name="$1"; shift
+  local name="$1" listener="$2"; shift 2
   docker run -d --name np-smoke-hc --network np-smoke \
     -v /var/run/docker.sock:/tmp/docker.sock:ro "$@" "$IMG" >/dev/null
   local ok=false
-  for _ in $(seq 1 20); do
-    docker exec np-smoke-hc /app/healthcheck.sh 2>/dev/null && { ok=true; break; }
+  for _ in $(seq 1 30); do
+    if docker exec np-smoke-hc nginx -T 2>/dev/null | grep -qE "$listener" \
+      && docker exec np-smoke-hc /app/healthcheck.sh 2>/dev/null; then
+      ok=true; break
+    fi
     sleep 1
   done
   if [[ "$ok" != true ]]; then
-    echo "::error::the HEALTHCHECK fails with $name"; docker logs np-smoke-hc; exit 1
+    echo "::error::the HEALTHCHECK fails with $name (or no '$listener' listener)"
+    docker exec np-smoke-hc nginx -T 2>/dev/null | grep -E '^ *listen ' || true
+    docker logs np-smoke-hc; exit 1
   fi
   echo "healthcheck passes with $name"
-  docker rm -f np-smoke-hc >/dev/null
 }
 
 # It follows HTTP_PORT; with PROXY protocol on (plain HTTP is refused there) it
 # falls back to the nginx master being alive.
-hc_case HTTP_PORT=8081 -e HTTP_PORT=8081
-hc_case ENABLE_PROXY_PROTOCOL=true -e ENABLE_PROXY_PROTOCOL=true
+hc_case HTTP_PORT=8081 'listen 8081[ ;]' -e HTTP_PORT=8081
+docker rm -f np-smoke-hc >/dev/null
+hc_case ENABLE_PROXY_PROTOCOL=true 'listen 80 proxy_protocol;' -e ENABLE_PROXY_PROTOCOL=true
+docker rm -f np-smoke-hc >/dev/null
 
 # A DEFAULT_HOST vhost on its own EXTERNAL_HTTP_PORT, HTTPS off: the template
 # then listens on 8082 and not on 80, and the check has to follow it.
@@ -119,8 +128,12 @@ docker run -d --name np-backend-port --network np-smoke \
   -e VIRTUAL_HOST=port.test -e VIRTUAL_PORT=8080 \
   -e EXTERNAL_HTTP_PORT=8082 -e HTTPS_METHOD=nohttps \
   "$BACKEND_IMAGE" >/dev/null
-hc_case "a DEFAULT_HOST on EXTERNAL_HTTP_PORT=8082" -e DEFAULT_HOST=port.test
-docker rm -f np-backend-port >/dev/null
+hc_case "a DEFAULT_HOST on EXTERNAL_HTTP_PORT=8082" 'listen 8082 default_server' \
+  -e DEFAULT_HOST=port.test
+if docker exec np-smoke-hc nginx -T 2>/dev/null | grep -qE '^ *listen 80[ ;]'; then
+  echo "::error::expected no listener on port 80 with DEFAULT_HOST on 8082"; exit 1
+fi
+docker rm -f np-smoke-hc np-backend-port >/dev/null
 
 start=$(date +%s)
 docker stop -t 10 np-smoke >/dev/null
