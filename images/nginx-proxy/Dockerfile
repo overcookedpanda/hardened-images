@@ -117,10 +117,11 @@ LABEL org.opencontainers.image.title="hardened-nginx-proxy" \
 # README.md for running it non-root.
 WORKDIR /app
 EXPOSE 80 443
-# Healthy when the generated config is valid and nginx answers on :80. Any HTTP
-# response counts, including the fallback server's 503 for an unknown host.
-# busybox wget and grep only: the image has no curl.
+# Healthy when the generated config is valid and nginx answers on its HTTP port
+# (HTTP_PORT, 80 by default). Any HTTP response counts, including the fallback
+# server's 503 for an unknown host. busybox wget and grep only: the image has no
+# curl. -Y off so an http_proxy in the environment can't answer for nginx.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-  CMD nginx -t -q && wget -q -S -O /dev/null -T 5 http://127.0.0.1/ 2>&1 | grep -q 'HTTP/'
+  CMD nginx -t -q && wget -q -S -O /dev/null -T 5 -Y off "http://127.0.0.1:${HTTP_PORT:-80}/" 2>&1 | grep -q 'HTTP/'
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["forego", "start", "-r"]
