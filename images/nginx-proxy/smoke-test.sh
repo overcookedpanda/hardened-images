@@ -8,14 +8,15 @@
 #   * docker-gen picks up a container with VIRTUAL_HOST and nginx routes to it,
 #     and drops it again when the container goes away (fallback answers 503);
 #   * the template patch holds: ENABLE_HTTP2=false leaves no `http2 on`;
-#   * the image's HEALTHCHECK command passes on a serving container;
+#   * the image's HEALTHCHECK passes on a serving container, also with a
+#     non-default HTTP_PORT and with ENABLE_PROXY_PROTOCOL=true;
 #   * the reload command acme-companion execs in this container works;
 #   * `docker stop` is handled well under the 10 s kill.
 #
 # Needs a docker login to dhi.io for the test backend (BACKEND_IMAGE), or set
 # BACKEND_IMAGE to any image that serves HTTP 200 on port 8080.
 set -euo pipefail
-trap 'docker rm -f np-smoke np-backend >/dev/null 2>&1 || true; docker network rm np-smoke >/dev/null 2>&1 || true' EXIT
+trap 'docker rm -f np-smoke np-smoke-hc np-backend >/dev/null 2>&1 || true; docker network rm np-smoke >/dev/null 2>&1 || true' EXIT
 IMG="${IMAGE:?set IMAGE to the image to test}"
 BACKEND_IMAGE="${BACKEND_IMAGE:-dhi.io/nginx:1.31.10-alpine3.24}"
 
@@ -52,11 +53,11 @@ expect() {
 
 expect unknown.test 503
 
-# The image's HEALTHCHECK command passes while only the fallback (503) answers.
+# The image's HEALTHCHECK passes while only the fallback (503) answers.
 HC="$(docker inspect -f '{{join .Config.Healthcheck.Test " "}}' np-smoke)"
-[[ "$HC" == CMD-SHELL* ]] || { echo "::error::no HEALTHCHECK in the image ($HC)"; exit 1; }
-docker exec np-smoke sh -c "${HC#CMD-SHELL }" \
-  || { echo "::error::the HEALTHCHECK command fails on a serving nginx-proxy"; exit 1; }
+[[ "$HC" == "CMD /app/healthcheck.sh" ]] || { echo "::error::unexpected HEALTHCHECK in the image ($HC)"; exit 1; }
+docker exec np-smoke /app/healthcheck.sh \
+  || { echo "::error::the HEALTHCHECK fails on a serving nginx-proxy"; exit 1; }
 
 # A backend declared the usual way: VIRTUAL_HOST/PORT on a
 # shared network. DHI nginx serves its welcome page on 8080.
@@ -88,6 +89,23 @@ expect app.test 200
 
 docker rm -f np-backend >/dev/null
 expect app.test 503
+
+# The HEALTHCHECK follows HTTP_PORT, and with PROXY protocol on (plain HTTP is
+# refused there) it falls back to the nginx master being alive.
+for env in HTTP_PORT=8081 ENABLE_PROXY_PROTOCOL=true; do
+  docker run -d --name np-smoke-hc --network np-smoke \
+    -v /var/run/docker.sock:/tmp/docker.sock:ro -e "$env" "$IMG" >/dev/null
+  ok=false
+  for _ in $(seq 1 20); do
+    docker exec np-smoke-hc /app/healthcheck.sh 2>/dev/null && { ok=true; break; }
+    sleep 1
+  done
+  if [[ "$ok" != true ]]; then
+    echo "::error::the HEALTHCHECK fails with $env"; docker logs np-smoke-hc; exit 1
+  fi
+  echo "healthcheck passes with $env"
+  docker rm -f np-smoke-hc >/dev/null
+done
 
 start=$(date +%s)
 docker stop -t 10 np-smoke >/dev/null

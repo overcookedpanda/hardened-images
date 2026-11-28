@@ -40,7 +40,7 @@ Change the image and recreate the container. Your certificates, `vhost.d`,
 | Entrypoint | bash | the same logic in POSIX sh ([`docker-entrypoint.sh`](docker-entrypoint.sh)) |
 | `nginx.tmpl` | upstream | upstream + [`patches/`](patches/) (the fallback server honours `ENABLE_HTTP2`; OCSP stapling is opt-in) |
 | User | root, nginx workers as `nginx` | the same (workers are uid 65532) |
-| `HEALTHCHECK` | none | `nginx -t` plus any HTTP answer on `HTTP_PORT` (default 80, busybox `wget`), every 30 s |
+| `HEALTHCHECK` | none | [`healthcheck.sh`](healthcheck.sh) every 30 s: `nginx -t` plus any HTTP answer on `HTTP_PORT` (default 80), or the nginx master alive when `ENABLE_PROXY_PROTOCOL` is on |
 
 ### OCSP stapling is off by default
 
