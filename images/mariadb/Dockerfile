@@ -1,5 +1,5 @@
 # Use Ubuntu 24.04 LTS (Noble)
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 # Which MariaDB series to track, and which mirror to install it from. Any
 # mirror listed at https://mariadb.org/download/ (repositories tab) works.
