@@ -97,6 +97,7 @@ RUN set -e; \
 COPY --from=build /out/docker-gen /out/forego /usr/local/bin/
 COPY --from=app /app/ /app/
 COPY --chmod=0755 docker-entrypoint.sh /app/docker-entrypoint.sh
+COPY --chmod=0755 healthcheck.sh /app/healthcheck.sh
 COPY nginx.conf /etc/nginx/nginx.conf
 RUN mv /app/network_internal.conf /etc/nginx/network_internal.conf
 
@@ -117,5 +118,9 @@ LABEL org.opencontainers.image.title="hardened-nginx-proxy" \
 # README.md for running it non-root.
 WORKDIR /app
 EXPOSE 80 443
+# Healthy when the config is valid and nginx is serving; see healthcheck.sh
+# (HTTP_PORT and ENABLE_PROXY_PROTOCOL aware, busybox only).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+  CMD ["/app/healthcheck.sh"]
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["forego", "start", "-r"]

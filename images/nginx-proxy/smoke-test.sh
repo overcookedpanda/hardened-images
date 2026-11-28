@@ -8,13 +8,16 @@
 #   * docker-gen picks up a container with VIRTUAL_HOST and nginx routes to it,
 #     and drops it again when the container goes away (fallback answers 503);
 #   * the template patch holds: ENABLE_HTTP2=false leaves no `http2 on`;
+#   * the image's HEALTHCHECK passes on a serving container, also with a
+#     non-default HTTP_PORT, with ENABLE_PROXY_PROTOCOL=true, and with a
+#     DEFAULT_HOST vhost on its own EXTERNAL_HTTP_PORT (nothing on port 80);
 #   * the reload command acme-companion execs in this container works;
 #   * `docker stop` is handled well under the 10 s kill.
 #
 # Needs a docker login to dhi.io for the test backend (BACKEND_IMAGE), or set
 # BACKEND_IMAGE to any image that serves HTTP 200 on port 8080.
 set -euo pipefail
-trap 'docker rm -f np-smoke np-backend >/dev/null 2>&1 || true; docker network rm np-smoke >/dev/null 2>&1 || true' EXIT
+trap 'docker rm -f np-smoke np-smoke-hc np-backend np-backend-port >/dev/null 2>&1 || true; docker network rm np-smoke >/dev/null 2>&1 || true' EXIT
 IMG="${IMAGE:?set IMAGE to the image to test}"
 BACKEND_IMAGE="${BACKEND_IMAGE:-dhi.io/nginx:1.31.10-alpine3.24}"
 
@@ -51,6 +54,12 @@ expect() {
 
 expect unknown.test 503
 
+# The image's HEALTHCHECK passes while only the fallback (503) answers.
+HC="$(docker inspect -f '{{join .Config.Healthcheck.Test " "}}' np-smoke)"
+[[ "$HC" == "CMD /app/healthcheck.sh" ]] || { echo "::error::unexpected HEALTHCHECK in the image ($HC)"; exit 1; }
+docker exec np-smoke /app/healthcheck.sh \
+  || { echo "::error::the HEALTHCHECK fails on a serving nginx-proxy"; exit 1; }
+
 # A backend declared the usual way: VIRTUAL_HOST/PORT on a
 # shared network. DHI nginx serves its welcome page on 8080.
 docker run -d --name np-backend --network np-smoke \
@@ -81,6 +90,53 @@ expect app.test 200
 
 docker rm -f np-backend >/dev/null
 expect app.test 503
+
+# The HEALTHCHECK passes on a fresh container started with the given args,
+# once docker-gen has written the config: nginx starts on its startup config,
+# so a case only counts after `nginx -T` shows the listener it is about
+# (extended regex in $2).
+hc_case() {
+  local name="$1" listener="$2"; shift 2
+  docker run -d --name np-smoke-hc --network np-smoke \
+    -v /var/run/docker.sock:/tmp/docker.sock:ro "$@" "$IMG" >/dev/null
+  local ok=false conf
+  for _ in $(seq 1 30); do
+    conf="$(docker exec np-smoke-hc nginx -T 2>/dev/null || true)"
+    if grep -qE "$listener" <<< "$conf" \
+      && docker exec np-smoke-hc /app/healthcheck.sh 2>/dev/null; then
+      ok=true; break
+    fi
+    sleep 1
+  done
+  if [[ "$ok" != true ]]; then
+    echo "::error::the HEALTHCHECK fails with $name (or no '$listener' listener)"
+    docker exec np-smoke-hc nginx -T 2>/dev/null | grep -E '^ *listen ' || true
+    docker logs np-smoke-hc; exit 1
+  fi
+  echo "healthcheck passes with $name"
+}
+
+# It follows HTTP_PORT; with PROXY protocol on (plain HTTP is refused there) it
+# falls back to the nginx master being alive.
+hc_case HTTP_PORT=8081 'listen 8081[ ;]' -e HTTP_PORT=8081
+docker rm -f np-smoke-hc >/dev/null
+hc_case ENABLE_PROXY_PROTOCOL=true 'listen 80 proxy_protocol;' -e ENABLE_PROXY_PROTOCOL=true
+docker rm -f np-smoke-hc >/dev/null
+
+# A DEFAULT_HOST vhost on its own EXTERNAL_HTTP_PORT, HTTPS off: the template
+# then listens on 8082 and not on 80, and the check has to follow it.
+docker run -d --name np-backend-port --network np-smoke \
+  -e VIRTUAL_HOST=port.test -e VIRTUAL_PORT=8080 \
+  -e EXTERNAL_HTTP_PORT=8082 -e HTTPS_METHOD=nohttps \
+  "$BACKEND_IMAGE" >/dev/null
+hc_case "a DEFAULT_HOST on EXTERNAL_HTTP_PORT=8082" 'listen 8082 default_server' \
+  -e DEFAULT_HOST=port.test
+CONF="$(docker exec np-smoke-hc nginx -T 2>/dev/null)" \
+  || { echo "::error::could not read the config with DEFAULT_HOST on 8082"; docker logs np-smoke-hc; exit 1; }
+if grep -qE '^ *listen 80[ ;]' <<< "$CONF"; then
+  echo "::error::expected no listener on port 80 with DEFAULT_HOST on 8082"; exit 1
+fi
+docker rm -f np-smoke-hc np-backend-port >/dev/null
 
 start=$(date +%s)
 docker stop -t 10 np-smoke >/dev/null
