@@ -80,7 +80,7 @@ that the image works, not that it starts: send it a request, run a query,
 read a config it generates. Then check the hardening you care about, so a
 base-image change can't quietly undo it: the user it runs as, tools that
 must be absent, setuid binaries. A `docker stop` timing check catches a PID 1
-that ignores SIGTERM. The three smoke tests in `images/` are examples.
+that ignores SIGTERM. The smoke tests in `images/` are examples.
 
 ## Docker Hardened Images
 

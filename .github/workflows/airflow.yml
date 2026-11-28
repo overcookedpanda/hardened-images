@@ -1,0 +1,48 @@
+name: airflow
+
+# Builds, smoke-tests, scans and publishes ghcr.io/<owner>/hardened-airflow
+# through the reusable build-scan-publish.yml. See images/airflow/README.md.
+#
+# The library gate is fixable CRITICAL only: Airflow's constraints file pins
+# known-vulnerable versions of some dependencies for the whole 2.11 line, and
+# overriding all of them would break the compatibility the constraints exist
+# for. Debian packages get the full CRITICAL/HIGH/MEDIUM gate. Every finding is
+# still in the report.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'images/airflow/**'
+      - '.github/workflows/airflow.yml'
+      - '.github/workflows/build-scan-publish.yml'
+  pull_request:
+    paths:
+      - 'images/airflow/**'
+      - '.github/workflows/airflow.yml'
+      - '.github/workflows/build-scan-publish.yml'
+  schedule:
+    - cron: '30 3 * * *'  # nightly: picks up base-image and package fixes
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  image:
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build-scan-publish.yml
+    with:
+      image-name: hardened-airflow
+      context: images/airflow
+      dockerfile: images/airflow/Dockerfile
+      smoke-test: images/airflow/smoke-test.sh
+      trivyignore: images/airflow/.trivyignore
+      dhi-login: false
+      gate-library-severity: CRITICAL
+      extra-tags: '2.11.2'
+    secrets:
+      dhi-username: ${{ secrets.DOCKERHUB_USERNAME }}
+      dhi-token: ${{ secrets.DOCKERHUB_TOKEN }}
+      discord-webhook: ${{ secrets.ALERTS_DISCORD_WEBHOOK }}
